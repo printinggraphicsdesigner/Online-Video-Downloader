@@ -3,10 +3,13 @@ services:
     name: online-video-downloader
     env: docker
     dockerfilePath: ./Dockerfile
+    
     envVars:
       - key: YTDL_NO_UPDATE
         value: "1"
       - key: WEB_CONCURRENCY
         value: 2
+      # ⚠️ Don't hardcode cookies in render.yaml!
+    
     healthCheckPath: /health
     autoDeploy: true
