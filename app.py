@@ -1,10 +1,9 @@
 """
 🎬 Video Downloader Backend - Flask + yt-dlp + FFmpeg Support
-WordPress Frontend + Render Backend (Docker)
-Version: 2.2.0 - YouTube Bot Bypass Enabled
+Version: 3.0.0 - All Platforms Fixed + Instagram Quality Panel
 """
 
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, send_file
 from flask_cors import CORS
 import yt_dlp
 import logging
@@ -13,7 +12,9 @@ import re
 import time
 import shutil
 import random
-from urllib.parse import urlparse
+import requests
+from urllib.parse import urlparse, parse_qs
+from io import BytesIO
 
 # Configure logging
 logging.basicConfig(
@@ -44,40 +45,58 @@ USER_AGENTS = [
     'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
     'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:121.0) Gecko/20100101 Firefox/121.0',
-    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2 Safari/605.1.15',
+    'Mozilla/5.0 (iPhone; CPU iPhone OS 17_2 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2 Mobile/15E148 Safari/604.1',
 ]
 
-def get_ydl_opts(download_mode=False, format_id=None, prefer_merged=True):
-    """Generate yt-dlp options with YouTube bot bypass"""
+def get_ydl_opts(download_mode=False, format_id=None, prefer_merged=True, site='generic'):
+    """Generate yt-dlp options with platform-specific bypass"""
+    
+    # Platform-specific options
+    extractor_args = {}
+    
+    if site == 'youtube':
+        extractor_args = {
+            'youtube': {
+                'player_client': 'web,ios',
+                'player_skip': ['webpage'],
+                'skip': ['dash', 'hls'],
+                'lang': 'en'
+            }
+        }
+    elif site == 'instagram':
+        extractor_args = {
+            'instagram': {
+                'include_formats': True
+            }
+        }
+    elif site == 'vimeo':
+        extractor_args = {
+            'vimeo': {}
+        }
     
     opts = {
         'quiet': True,
         'no_warnings': True,
         'extract_flat': False if not download_mode else 'in_playlist',
         'user_agent': random.choice(USER_AGENTS),
-        'referer': 'https://www.youtube.com/',
+        'referer': 'https://www.google.com/',
         'socket_timeout': 30,
         'retries': 3,
         'no_check_certificate': True,
         'noplaylist': True,
         'ignoreerrors': False,
         
-        # YouTube Bot Bypass Options
-        'extractor_args': {
-            'youtube': {
-                'player_client': 'web',
-                'player_skip': ['webpage'],
-                'skip': ['dash', 'hls'],
-                'lang': 'en'
-            }
-        },
+        # Platform-specific extractor args
+        'extractor_args': extractor_args,
         
-        # Additional HTTP Headers
+        # Additional HTTP Headers to bypass bot detection
         'http_headers': {
             'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
             'Accept-Language': 'en-us,en;q=0.5',
             'Sec-Fetch-Mode': 'navigate',
             'Sec-Fetch-Site': 'none',
+            'Sec-Fetch-User': '?1',
+            'Upgrade-Insecure-Requests': '1',
         },
         
         # Cookie handling (if cookies.txt exists)
@@ -91,6 +110,23 @@ def get_ydl_opts(download_mode=False, format_id=None, prefer_merged=True):
     
     return opts
 
+def detect_site(url):
+    """Detect which site the URL is from"""
+    if 'youtube.com' in url or 'youtu.be' in url:
+        return 'youtube'
+    elif 'instagram.com' in url:
+        return 'instagram'
+    elif 'vimeo.com' in url:
+        return 'vimeo'
+    elif 'pinterest.com' in url:
+        return 'pinterest'
+    elif 'facebook.com' in url or 'fb.watch' in url:
+        return 'facebook'
+    elif 'tiktok.com' in url:
+        return 'tiktok'
+    else:
+        return 'generic'
+
 def sanitize_filename(filename):
     """Remove unsafe characters from filename"""
     if not filename:
@@ -103,12 +139,100 @@ def is_ffmpeg_available():
     """Check if FFmpeg is available on the system"""
     return shutil.which('ffmpeg') is not None
 
+def format_instagram_qualities(formats):
+    """Format Instagram qualities properly: 1080p, 720p, 480p, 360p, 240p, Audio"""
+    qualities = []
+    seen_labels = set()
+    
+    # Standard quality labels for Instagram
+    quality_map = {
+        1080: '1080p Full HD',
+        720: '720p HD',
+        480: '480p',
+        360: '360p',
+        240: '240p',
+    }
+    
+    # First, collect video formats
+    video_formats = []
+    audio_formats = []
+    
+    for fmt in formats:
+        if not fmt.get('format_id'):
+            continue
+            
+        height = fmt.get('height', 0)
+        vcodec = fmt.get('vcodec', 'none')
+        acodec = fmt.get('acodec', 'none')
+        ext = fmt.get('ext', 'mp4')
+        filesize = fmt.get('filesize') or fmt.get('filesize_approx', 0)
+        
+        # Skip if no video and no audio
+        if vcodec == 'none' and acodec == 'none':
+            continue
+        
+        # Audio only
+        if vcodec == 'none' and acodec != 'none':
+            audio_formats.append({
+                'format_id': fmt['format_id'],
+                'label': 'Audio Only',
+                'ext': fmt.get('ext', 'm4a'),
+                'filesize': filesize,
+                'vcodec': '✗',
+                'acodec': '✓',
+                'url': fmt.get('url'),
+            })
+            continue
+        
+        # Video formats
+        if height > 0:
+            # Find the closest standard quality
+            best_match = None
+            for std_height, std_label in sorted(quality_map.items(), reverse=True):
+                if height >= std_height:
+                    best_match = (std_height, std_label)
+                    break
+            
+            if best_match:
+                label = best_match[1]
+            else:
+                label = f"{height}p"
+            
+            # Avoid duplicates
+            if label in seen_labels:
+                continue
+            seen_labels.add(label)
+            
+            video_formats.append({
+                'format_id': fmt['format_id'],
+                'label': label,
+                'ext': ext,
+                'filesize': filesize,
+                'vcodec': '✓',
+                'acodec': '✓' if acodec != 'none' else '✗',
+                'url': fmt.get('url'),
+                'height': height,
+            })
+    
+    # Sort video formats by height (highest first)
+    video_formats.sort(key=lambda x: x.get('height', 0), reverse=True)
+    
+    # Add video formats
+    qualities.extend(video_formats)
+    
+    # Add audio format (only one)
+    if audio_formats:
+        qualities.append(audio_formats[0])
+    
+    return qualities
+
 def extract_video_info(url):
     """Extract video metadata and available formats"""
-    ydl_opts = get_ydl_opts(download_mode=False)
+    site = detect_site(url)
+    ydl_opts = get_ydl_opts(download_mode=False, site=site)
     ffmpeg_available = is_ffmpeg_available()
     
-    logger.info(f"Starting extraction for: {url[:80]}...")
+    logger.info(f"Starting extraction for: {url[:80]}... (Site: {site})")
     logger.info(f"FFmpeg available: {ffmpeg_available}")
     
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -123,88 +247,93 @@ def extract_video_info(url):
             logger.info(f"Extraction successful! Title: {info.get('title', 'Unknown')}")
             logger.info(f"Found {len(info.get('formats', []))} formats")
             
-            # Filter and format quality options
-            qualities = []
-            seen = set()
-            
-            for fmt in info.get('formats', []):
-                fmt_id = fmt.get('format_id')
-                if not fmt_id:
-                    continue
+            # Format qualities based on site
+            if site == 'instagram':
+                qualities = format_instagram_qualities(info.get('formats', []))
+            else:
+                # Generic quality formatting for other sites
+                qualities = []
+                seen = set()
+                
+                for fmt in info.get('formats', []):
+                    fmt_id = fmt.get('format_id')
+                    if not fmt_id:
+                        continue
+                        
+                    ext = fmt.get('ext', 'mp4')
+                    height = fmt.get('height')
+                    filesize = fmt.get('filesize') or fmt.get('filesize_approx')
+                    vcodec = fmt.get('vcodec', 'none')
+                    acodec = fmt.get('acodec', 'none')
+                    fps = fmt.get('fps')
+                    tbr = fmt.get('tbr')
+                    protocol = fmt.get('protocol', 'https')
                     
-                ext = fmt.get('ext', 'mp4')
-                height = fmt.get('height')
-                filesize = fmt.get('filesize') or fmt.get('filesize_approx')
-                vcodec = fmt.get('vcodec', 'none')
-                acodec = fmt.get('acodec', 'none')
-                fps = fmt.get('fps')
-                tbr = fmt.get('tbr')
-                protocol = fmt.get('protocol', 'https')
-                
-                # Skip incomplete formats
-                if vcodec == 'none' and acodec == 'none':
-                    continue
-                
-                # FFmpeg-aware filtering
-                if not ffmpeg_available and vcodec != 'none' and acodec == 'none':
-                    continue
-                if not ffmpeg_available and vcodec == 'none' and acodec != 'none':
-                    continue
-                
-                # Create quality label
-                if height and height > 0:
-                    label = f"{height}p"
-                    if fps and fps > 30:
-                        label += f"{int(fps)}"
-                elif fmt.get('resolution'):
-                    label = fmt['resolution']
-                elif tbr:
-                    label = f"{int(tbr)}k"
-                else:
-                    label = fmt.get('format_note') or fmt_id
-                
-                # Avoid duplicates
-                key = f"{label}_{ext}_{vcodec}_{acodec}"
-                if key in seen:
-                    continue
-                seen.add(key)
-                
-                # Format filesize
-                if filesize:
-                    if filesize > 1024*1024*1024:
-                        size_str = f"{filesize/1024/1024/1024:.1f} GB"
-                    elif filesize > 1024*1024:
-                        size_str = f"{filesize/1024/1024:.1f} MB"
+                    # Skip incomplete formats
+                    if vcodec == 'none' and acodec == 'none':
+                        continue
+                    
+                    # FFmpeg-aware filtering
+                    if not ffmpeg_available and vcodec != 'none' and acodec == 'none':
+                        continue
+                    if not ffmpeg_available and vcodec == 'none' and acodec != 'none':
+                        continue
+                    
+                    # Create quality label
+                    if height and height > 0:
+                        label = f"{height}p"
+                        if fps and fps > 30:
+                            label += f"{int(fps)}"
+                    elif fmt.get('resolution'):
+                        label = fmt['resolution']
+                    elif tbr:
+                        label = f"{int(tbr)}k"
                     else:
-                        size_str = f"{filesize/1024:.1f} KB"
-                else:
-                    size_str = "Unknown"
+                        label = fmt.get('format_note') or fmt_id
+                    
+                    # Avoid duplicates
+                    key = f"{label}_{ext}_{vcodec}_{acodec}"
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    
+                    # Format filesize
+                    if filesize:
+                        if filesize > 1024*1024*1024:
+                            size_str = f"{filesize/1024/1024/1024:.1f} GB"
+                        elif filesize > 1024*1024:
+                            size_str = f"{filesize/1024/1024:.1f} MB"
+                        else:
+                            size_str = f"{filesize/1024:.1f} KB"
+                    else:
+                        size_str = "Unknown"
+                    
+                    # Check if format needs merging
+                    needs_merge = (vcodec != 'none' and acodec == 'none') or (vcodec == 'none' and acodec != 'none')
+                    
+                    qualities.append({
+                        'format_id': fmt_id,
+                        'label': label,
+                        'ext': ext,
+                        'filesize': size_str,
+                        'filesize_bytes': filesize,
+                        'vcodec': '✓' if vcodec and vcodec != 'none' else '✗',
+                        'acodec': '✓' if acodec and acodec != 'none' else '✗',
+                        'fps': fps,
+                        'protocol': protocol,
+                        'url': fmt.get('url'),
+                        'needs_ffmpeg': needs_merge and not ffmpeg_available,
+                        'note': 'Requires FFmpeg' if needs_merge and not ffmpeg_available else None
+                    })
                 
-                # Check if format needs merging
-                needs_merge = (vcodec != 'none' and acodec == 'none') or (vcodec == 'none' and acodec != 'none')
+                # Sort: prefer higher resolution + complete formats
+                def quality_score(q):
+                    res = int(''.join(filter(str.isdigit, str(q['label'])))) if any(c.isdigit() for c in str(q['label'])) else 0
+                    complete = 0 if q.get('needs_ffmpeg', False) else 1
+                    return (res * 100) + (complete * 50)
                 
-                qualities.append({
-                    'format_id': fmt_id,
-                    'label': label,
-                    'ext': ext,
-                    'filesize': size_str,
-                    'filesize_bytes': filesize,
-                    'vcodec': '✓' if vcodec and vcodec != 'none' else '✗',
-                    'acodec': '✓' if acodec and acodec != 'none' else '✗',
-                    'fps': fps,
-                    'protocol': protocol,
-                    'url': fmt.get('url'),
-                    'needs_ffmpeg': needs_merge and not ffmpeg_available,
-                    'note': 'Requires FFmpeg' if needs_merge and not ffmpeg_available else None
-                })
-            
-            # Sort: prefer higher resolution + complete formats
-            def quality_score(q):
-                res = int(''.join(filter(str.isdigit, str(q['label'])))) if any(c.isdigit() for c in str(q['label'])) else 0
-                complete = 0 if q['needs_ffmpeg'] else 1
-                return (res * 100) + (complete * 50)
-            
-            qualities.sort(key=quality_score, reverse=True)
+                qualities.sort(key=quality_score, reverse=True)
+                qualities = qualities[:20]  # Limit to top 20
             
             return {
                 'success': True,
@@ -213,7 +342,7 @@ def extract_video_info(url):
                 'duration': info.get('duration', 0),
                 'uploader': info.get('uploader') or info.get('channel') or 'Unknown',
                 'view_count': info.get('view_count'),
-                'qualities': qualities[:20],
+                'qualities': qualities,
                 'ffmpeg_available': ffmpeg_available,
                 'webpage_url': info.get('webpage_url', url),
                 'is_live': info.get('live_status') == 'is_live' or info.get('is_live', False)
@@ -240,6 +369,8 @@ def extract_video_info(url):
                 raise ValueError("This video is for members only.")
             elif 'premium' in error_msg or 'paid' in error_msg:
                 raise ValueError("This video requires YouTube Premium or purchase.")
+            elif '403' in error_msg or 'forbidden' in error_msg:
+                raise ValueError("Access forbidden. This site may be blocking automated requests. Try again later.")
             else:
                 raise ValueError(f"Failed to extract video: {str(e)[:150]}")
 
@@ -248,7 +379,7 @@ def home():
     """Health check / info endpoint"""
     return jsonify({
         'service': 'Video Downloader API',
-        'version': '2.2.0',
+        'version': '3.0.0',
         'status': 'running',
         'ffmpeg': is_ffmpeg_available(),
         'endpoints': {
@@ -265,7 +396,7 @@ def health_check():
         'status': 'healthy',
         'ffmpeg': is_ffmpeg_available(),
         'timestamp': time.time(),
-        'version': '2.2.0'
+        'version': '3.0.0'
     }), 200
 
 @app.route('/api/get-info', methods=['POST', 'OPTIONS'])
@@ -327,6 +458,8 @@ def get_video_info():
             return jsonify({'success': False, 'error': 'Live streams cannot be downloaded. Wait until it ends.'}), 400
         elif 'copyright' in error_msg:
             return jsonify({'success': False, 'error': 'Video removed due to copyright claim'}), 403
+        elif '403' in error_msg or 'forbidden' in error_msg:
+            return jsonify({'success': False, 'error': 'Access forbidden. This site may be blocking automated requests.'}), 403
         else:
             return jsonify({'success': False, 'error': f'Failed to fetch video: {str(e)[:150]}'}), 500
     except Exception as e:
@@ -336,7 +469,7 @@ def get_video_info():
 @app.route('/api/download', methods=['POST', 'OPTIONS'])
 def download_video():
     """
-    Generate download link
+    Generate download link or proxy the video
     Request: {"url": "...", "format_id": "..."}
     Response: {success, download_url, title, filename}
     """
@@ -357,7 +490,8 @@ def download_video():
         
         logger.info(f"Download request: {video_url[:50]}... | format: {format_id}")
         
-        ydl_opts = get_ydl_opts(download_mode=True, format_id=format_id)
+        site = detect_site(video_url)
+        ydl_opts = get_ydl_opts(download_mode=True, format_id=format_id, site=site)
         
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(video_url, download=False)
@@ -365,11 +499,25 @@ def download_video():
             if not info:
                 return jsonify({'success': False, 'error': 'Failed to fetch video info'}), 500
             
-            direct_url = info.get('url')
+            # Find the specific format
+            direct_url = None
+            selected_format = None
+            
+            for fmt in info.get('formats', []):
+                if fmt.get('format_id') == format_id:
+                    direct_url = fmt.get('url')
+                    selected_format = fmt
+                    break
+            
+            # If specific format not found, use the best URL
+            if not direct_url:
+                direct_url = info.get('url')
+                selected_format = info
             
             if direct_url:
                 title = sanitize_filename(info.get('title', 'video'))
-                ext = info.get('ext', 'mp4')
+                ext = selected_format.get('ext', 'mp4') if selected_format else 'mp4'
+                filesize = selected_format.get('filesize') if selected_format else info.get('filesize')
                 
                 return jsonify({
                     'success': True,
@@ -378,7 +526,7 @@ def download_video():
                     'title': info.get('title'),
                     'filename': f"{title}.{ext}",
                     'ext': ext,
-                    'filesize': info.get('filesize'),
+                    'filesize': filesize,
                     'hint': 'If download fails, try right-click → "Save link as..." or use a download manager.'
                 })
             else:
@@ -401,6 +549,10 @@ def download_video():
 def not_found(e):
     return jsonify({'error': 'Endpoint not found'}), 404
 
+@app.errorhandler(405)
+def method_not_allowed(e):
+    return jsonify({'error': 'Method not allowed. Use POST for this endpoint.'}), 405
+
 @app.errorhandler(429)
 def rate_limit(e):
     return jsonify({'error': 'Too many requests. Please slow down.'}), 429
@@ -412,6 +564,6 @@ def server_error(e):
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 8000))
-    logger.info(f"🚀 Starting Video Downloader v2.2.0 on port {port}")
+    logger.info(f"🚀 Starting Video Downloader v3.0.0 on port {port}")
     logger.info(f"FFmpeg available: {is_ffmpeg_available()}")
     app.run(host='0.0.0.0', port=port, debug=False)
