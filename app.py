@@ -85,8 +85,8 @@ def extract_youtube_via_invidious(video_id):
     for instance in INVIDIOUS_INSTANCES:
         try:
             logger.info(f"Trying Invidious: {instance}")
-            url = f"{instance}/api/v1/videos/{video_id}"
-            response = requests.get(url, timeout=15, headers={
+            api_url = f"{instance}/api/v1/videos/{video_id}"
+            response = requests.get(api_url, timeout=15, headers={
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
             })
             
@@ -459,9 +459,8 @@ def download():
                 download_url = info.get('url')
             
             if download_url:
-                from re import sub as re_sub
-                title = re_sub(r'[^\w\s\.\-]', '', info.get('title', 'video'))
-                title = re_sub(r'\s+', '_', title.strip())[:100]
+                title = re.sub(r'[^\w\s\.\-]', '', info.get('title', 'video'))
+                title = re.sub(r'\s+', '_', title.strip())[:100]
                 ext = 'mp4'
                 
                 return jsonify({
