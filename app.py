@@ -1,5 +1,5 @@
 """
-🎬 Video Downloader - Direct Download + All Fixes
+🎬 Video Downloader - All Sites Fixed
 """
 
 from flask import Flask, request, jsonify, Response, stream_with_context
@@ -18,20 +18,29 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
-CORS(app, resources={r"/api/*": {"origins": "*", "methods": ["GET", "POST", "OPTIONS"]}})
+CORS(app, resources={
+    r"/api/*": {
+        "origins": "*",
+        "methods": ["GET", "POST", "OPTIONS"],
+        "allow_headers": ["Content-Type", "Authorization"]
+    }
+})
 app.config['MAX_CONTENT_LENGTH'] = 512 * 1024 * 1024
 
 def detect_site(url):
-    if 'youtube.com' in url or 'youtu.be' in url:
+    url_lower = url.lower()
+    if 'youtube.com' in url_lower or 'youtu.be' in url_lower:
         return 'youtube'
-    elif 'instagram.com' in url:
+    elif 'instagram.com' in url_lower or 'instagr.am' in url_lower:
         return 'instagram'
-    elif 'vimeo.com' in url:
+    elif 'vimeo.com' in url_lower:
         return 'vimeo'
-    elif 'tiktok.com' in url:
+    elif 'tiktok.com' in url_lower:
         return 'tiktok'
-    elif 'facebook.com' in url or 'fb.watch' in url:
+    elif 'facebook.com' in url_lower or 'fb.watch' in url_lower or 'fb.com' in url_lower:
         return 'facebook'
+    elif 'twitter.com' in url_lower or 'x.com' in url_lower:
+        return 'twitter'
     else:
         return 'generic'
 
@@ -58,18 +67,43 @@ def get_ydl_opts(site='generic'):
     
     if site == 'youtube':
         opts.update({
-            'extractor_args': {'youtube': {'player_client': 'web,ios,android,mweb', 'player_skip': ['webpage']}},
-            'http_headers': {'Accept': 'text/html,application/xhtml+xml', 'Accept-Language': 'en-US,en;q=0.9'}
+            'extractor_args': {
+                'youtube': {
+                    'player_client': 'web,ios,android,mweb',
+                    'player_skip': ['webpage'],
+                    'skip': ['dash', 'hls'],
+                }
+            },
+            'http_headers': {
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                'Accept-Language': 'en-US,en;q=0.9',
+                'Sec-Fetch-Mode': 'navigate',
+            }
         })
     elif site == 'instagram':
         opts.update({
-            'extractor_args': {'instagram': {'include_formats': True}},
-            'http_headers': {'Accept': '*/*', 'X-IG-App-ID': '936619743392459'}
+            'extractor_args': {
+                'instagram': {
+                    'include_formats': True,
+                    'embed_source': 'web'
+                }
+            },
+            'http_headers': {
+                'Accept': '*/*',
+                'X-IG-App-ID': '936619743392459',
+            }
         })
     elif site == 'vimeo':
         opts.update({
-            'extractor_args': {'vimeo': {'force_noplaylist': True}},
-            'http_headers': {'Referer': 'https://vimeo.com/', 'User-Agent': 'Mozilla/5.0'}
+            'extractor_args': {
+                'vimeo': {
+                    'force_noplaylist': True,
+                }
+            },
+            'http_headers': {
+                'Referer': 'https://vimeo.com/',
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+            }
         })
     elif site == 'tiktok':
         opts.update({
@@ -80,6 +114,11 @@ def get_ydl_opts(site='generic'):
         opts.update({
             'extractor_args': {'facebook': {}},
             'http_headers': {'Referer': 'https://www.facebook.com/'}
+        })
+    elif site == 'twitter':
+        opts.update({
+            'extractor_args': {'twitter': {}},
+            'http_headers': {'Referer': 'https://twitter.com/'}
         })
     
     return opts
@@ -174,18 +213,32 @@ def format_qualities(formats, site='generic'):
     
     return qualities
 
-def extract_with_retry(url, site, max_tries=3):
+def extract_with_retry(url, site, max_tries=4):
     for attempt in range(max_tries):
         try:
             opts = get_ydl_opts(site)
+            
             if attempt == 1 and site == 'youtube':
                 opts['extractor_args']['youtube']['player_client'] = 'web,ios,android,mweb'
-            elif attempt == 2:
-                opts = {
-                    'quiet': True, 'no_warnings': True, 'no_check_certificate': True,
-                    'noplaylist': True, 'ignoreerrors': False,
-                    'user_agent': 'Mozilla/5.0', 'socket_timeout': 20,
-                }
+            elif attempt >= 2:
+                # For Vimeo, try different approach
+                if site == 'vimeo':
+                    opts = {
+                        'quiet': True, 'no_warnings': True,
+                        'no_check_certificate': True,
+                        'noplaylist': True, 'ignoreerrors': False,
+                        'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
+                        'socket_timeout': 30,
+                        'http_headers': {'Referer': 'https://vimeo.com/'},
+                    }
+                else:
+                    opts = {
+                        'quiet': True, 'no_warnings': True,
+                        'no_check_certificate': True,
+                        'noplaylist': True, 'ignoreerrors': False,
+                        'user_agent': 'Mozilla/5.0',
+                        'socket_timeout': 20,
+                    }
             
             logger.info(f"Attempt {attempt + 1}/{max_tries} for {site}")
             
@@ -214,41 +267,48 @@ def extract_with_retry(url, site, max_tries=3):
                     'platform': site,
                 }
                 
-        except Exception as e:
-            error_msg = str(e).lower()
+        except yt_dlp.utils.DownloadError as e:
+            error_msg = str(e)
             logger.error(f"Attempt {attempt + 1} failed: {e}")
             
             if attempt == max_tries - 1:
-                if 'private' in error_msg or 'unavailable' in error_msg:
-                    raise ValueError("Video is private or unavailable")
-                elif 'bot' in error_msg or 'authentication' in error_msg or 'login' in error_msg:
-                    raise ValueError("Site requires authentication. Try again later.")
-                elif 'region' in error_msg or 'blocked' in error_msg:
+                error_lower = error_msg.lower()
+                
+                # Specific error handling
+                if 'private' in error_lower or 'unavailable' in error_lower or 'does not exist' in error_lower:
+                    raise ValueError("Video is private, unavailable, or does not exist")
+                elif any(x in error_lower for x in ['bot', 'authentication', 'login', 'sign in', 'requires']):
+                    raise ValueError("Site requires authentication. Try again later or use a different video.")
+                elif 'region' in error_lower or 'blocked' in error_lower or 'not available in your country' in error_lower:
                     raise ValueError("Video not available in your region")
-                elif 'live' in error_msg:
+                elif 'live' in error_lower or 'streaming' in error_lower:
                     raise ValueError("Live stream cannot be downloaded")
-                elif 'copyright' in error_msg:
+                elif 'copyright' in error_lower or 'removed' in error_lower:
                     raise ValueError("Video removed due to copyright")
-                elif '403' in error_msg or 'forbidden' in error_msg:
-                    raise ValueError("Access forbidden by the site")
-                elif 'config_url' in error_msg:
-                    raise ValueError("Failed to extract Vimeo video. It may be private or restricted.")
+                elif '403' in error_lower or 'forbidden' in error_lower:
+                    raise ValueError("Access forbidden by the site. Try again later.")
+                elif 'config_url' in error_lower or 'keyerror' in error_lower:
+                    if site == 'vimeo':
+                        raise ValueError("Failed to extract Vimeo video. It may be private, password-protected, or restricted.")
+                    else:
+                        raise ValueError("Failed to extract video data. It may be private or restricted.")
                 else:
-                    raise ValueError(f"Failed to extract: {str(e)[:100]}")
-            time.sleep(1)
+                    raise ValueError(f"Failed to extract: {error_msg[:150]}")
+            
+            time.sleep(1.5 ** attempt)
 
 @app.route('/')
 def home():
     return jsonify({
         'service': 'Video Downloader',
-        'version': '8.0.0',
+        'version': '9.0.0',
         'status': 'running',
-        'supported': ['Instagram', 'TikTok', 'Facebook', 'Vimeo', 'YouTube (limited)'],
+        'supported': ['Instagram', 'TikTok', 'Facebook', 'Twitter', 'Vimeo (public)', 'YouTube (limited)'],
     })
 
 @app.route('/health')
 def health():
-    return jsonify({'status': 'healthy', 'version': '8.0.0'}), 200
+    return jsonify({'status': 'healthy', 'version': '9.0.0'}), 200
 
 @app.route('/api/get-info', methods=['POST', 'OPTIONS'])
 def get_info():
@@ -337,7 +397,6 @@ def download():
         logger.error(f"Download error: {e}")
         return jsonify({'success': False, 'error': f'Failed: {str(e)[:100]}'}), 500
 
-# ✅ NEW: Proxy download endpoint for direct download
 @app.route('/api/proxy-download')
 def proxy_download():
     """Stream video with Content-Disposition: attachment header"""
@@ -350,7 +409,6 @@ def proxy_download():
         
         logger.info(f"Proxy download: {video_url[:80]}...")
         
-        # Stream the video from CDN
         response = requests.get(video_url, stream=True, headers={
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
         }, timeout=30)
@@ -358,10 +416,8 @@ def proxy_download():
         if response.status_code != 200:
             return jsonify({'error': f'Failed to fetch video: {response.status_code}'}), 500
         
-        # Get content type
         content_type = response.headers.get('Content-Type', 'video/mp4')
         
-        # Stream with attachment header
         def generate():
             for chunk in response.iter_content(chunk_size=8192):
                 if chunk:
@@ -374,12 +430,42 @@ def proxy_download():
                 'Content-Disposition': f'attachment; filename="{filename}"',
                 'Content-Type': content_type,
                 'Cache-Control': 'no-cache',
+                'Access-Control-Allow-Origin': '*',
             }
         )
         
     except Exception as e:
         logger.error(f"Proxy download error: {e}")
         return jsonify({'error': f'Proxy failed: {str(e)[:100]}'}), 500
+
+@app.route('/api/proxy-image')
+def proxy_image():
+    """Proxy for thumbnails to avoid CORS issues"""
+    try:
+        image_url = request.args.get('url')
+        if not image_url:
+            return jsonify({'error': 'URL required'}), 400
+        
+        response = requests.get(image_url, headers={
+            'User-Agent': 'Mozilla/5.0',
+        }, timeout=10)
+        
+        if response.status_code == 200:
+            content_type = response.headers.get('Content-Type', 'image/jpeg')
+            return Response(
+                response.content,
+                mimetype=content_type,
+                headers={
+                    'Cache-Control': 'public, max-age=86400',
+                    'Access-Control-Allow-Origin': '*',
+                }
+            )
+        else:
+            return jsonify({'error': 'Failed to fetch image'}), 500
+            
+    except Exception as e:
+        logger.error(f"Proxy image error: {e}")
+        return jsonify({'error': f'Image proxy failed: {str(e)[:80]}'}), 500
 
 @app.errorhandler(404)
 def not_found(e):
