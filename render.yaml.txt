@@ -1,16 +1,12 @@
-# render.yaml
 services:
   - type: web
     name: online-video-downloader
-    env: docker  # ← ✅ Docker মোড ফোর্স করুন
-    dockerfilePath: ./Dockerfile  # ← ✅ Dockerfile পাথ
-    # buildCommand/startCommand লাগবে না Docker মোডে!
-    
+    env: docker
+    dockerfilePath: ./Dockerfile
     envVars:
       - key: YTDL_NO_UPDATE
         value: "1"
       - key: WEB_CONCURRENCY
         value: 2
-    
     healthCheckPath: /health
     autoDeploy: true
