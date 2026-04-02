@@ -12,6 +12,7 @@ env/
 .vscode/
 .idea/
 *.swp
+*.swo
 
 # OS
 .DS_Store
@@ -21,14 +22,9 @@ Thumbs.db
 *.log
 logs/
 
-# Local config
+# NEVER commit these:
 .env
-config.local.py
-
-# Downloads/temp
-downloads/
-temp/
-*.part
-
-# ⚠️ IMPORTANT: Don't commit cookies to GitHub!
+*.key
+*.secret
 cookies.txt
+config.local.py
