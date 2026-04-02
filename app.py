@@ -1,7 +1,7 @@
 """
-🎬 Professional Video Downloader - Multi-Platform Support
+🎬 Professional Video Downloader - No Cookies Required
 WordPress Frontend + Render Backend (Docker)
-Version: 5.0.0 - Production Ready
+Version: 5.1.0 - Syntax Fixed + Cookie-Free
 """
 
 from flask import Flask, request, jsonify
@@ -13,8 +13,7 @@ import re
 import time
 import shutil
 import random
-import requests
-from urllib.parse import urlparse, parse_qs, unquote
+from urllib.parse import urlparse
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -23,7 +22,6 @@ app = Flask(__name__)
 CORS(app, resources={r"/api/*": {"origins": "*", "methods": ["GET", "POST", "OPTIONS"], "allow_headers": ["Content-Type"]}})
 app.config['MAX_CONTENT_LENGTH'] = 512 * 1024 * 1024
 
-# Professional User-Agents
 USER_AGENTS = [
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
     'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
@@ -33,7 +31,6 @@ USER_AGENTS = [
 ]
 
 def detect_site(url):
-    """Detect platform from URL"""
     url_lower = url.lower()
     if any(x in url_lower for x in ['youtube.com', 'youtu.be', 'youtube.com/shorts']):
         return 'youtube'
@@ -52,33 +49,15 @@ def detect_site(url):
     else:
         return 'generic'
 
-def get_ydl_opts(site='generic', format_id=None, cookies_file=None):
-    """Professional yt-dlp options"""
-    
-    # Platform-specific configurations
+def get_ydl_opts(site='generic', format_id=None):
     platform_configs = {
         'youtube': {
-            'extractor_args': {
-                'youtube': {
-                    'player_client': 'web,web_embedded,ios,android,mweb',
-                    'player_skip': ['webpage'],
-                    'lang': 'en',
-                    'extractor_retries': 5,
-                }
-            },
-            'http_headers': {
-                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-                'Accept-Language': 'en-US,en;q=0.9',
-                'Sec-Fetch-Mode': 'navigate',
-                'Sec-Fetch-Site': 'none',
-            }
+            'extractor_args': {'youtube': {'player_client': 'web,ios', 'player_skip': ['webpage'], 'lang': 'en'}},
+            'http_headers': {'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8', 'Accept-Language': 'en-US,en;q=0.9', 'Sec-Fetch-Mode': 'navigate', 'Sec-Fetch-Site': 'none'}
         },
         'instagram': {
             'extractor_args': {'instagram': {'include_formats': True}},
-            'http_headers': {
-                'Accept': '*/*',
-                'X-IG-App-ID': '936619743392459',
-            }
+            'http_headers': {'Accept': '*/*'}
         },
         'vimeo': {
             'extractor_args': {'vimeo': {'force_noplaylist': True}},
@@ -102,10 +81,7 @@ def get_ydl_opts(site='generic', format_id=None, cookies_file=None):
         }
     }
     
-    config = platform_configs.get(site, platform_configs['generic'] if 'generic' in platform_configs else {
-        'extractor_args': {},
-        'http_headers': {}
-    })
+    config = platform_configs.get(site, {'extractor_args': {}, 'http_headers': {}})
     
     opts = {
         'quiet': True,
@@ -125,10 +101,6 @@ def get_ydl_opts(site='generic', format_id=None, cookies_file=None):
         'geo_bypass_country': 'US',
     }
     
-    # Add cookies if available
-    if cookies_file and os.path.exists(cookies_file):
-        opts['cookiefile'] = cookies_file
-    
     if format_id:
         opts['format'] = format_id
     else:
@@ -147,22 +119,9 @@ def is_ffmpeg_available():
     return shutil.which('ffmpeg') is not None
 
 def format_qualities(formats, site='generic'):
-    """Format qualities for all platforms"""
     qualities = []
     seen = set()
-    
-    # Standard quality labels
-    quality_map = {
-        2160: '2160p 4K',
-        1440: '1440p 2K',
-        1080: '1080p Full HD',
-        720: '720p HD',
-        480: '480p',
-        360: '360p',
-        240: '240p',
-        144: '144p',
-    }
-    
+    quality_map = {2160: '2160p 4K', 1440: '1440p 2K', 1080: '1080p Full HD', 720: '720p HD', 480: '480p', 360: '360p', 240: '240p', 144: '144p'}
     video_formats = []
     audio_formats = []
     
@@ -170,7 +129,6 @@ def format_qualities(formats, site='generic'):
         fmt_id = fmt.get('format_id')
         if not fmt_id:
             continue
-        
         height = fmt.get('height', 0)
         vcodec = fmt.get('vcodec', 'none')
         acodec = fmt.get('acodec', 'none')
@@ -180,26 +138,14 @@ def format_qualities(formats, site='generic'):
         tbr = fmt.get('tbr', 0)
         fmt_url = fmt.get('url')
         
-        # Skip incomplete formats
         if vcodec == 'none' and acodec == 'none':
             continue
         
-        # Audio only
         if vcodec == 'none' and acodec != 'none':
-            audio_formats.append({
-                'format_id': fmt_id,
-                'label': 'Audio Only',
-                'ext': fmt.get('ext', 'm4a'),
-                'filesize': filesize,
-                'vcodec': '✗',
-                'acodec': '✓',
-                'url': fmt_url,
-            })
+            audio_formats.append({'format_id': fmt_id, 'label': 'Audio Only', 'ext': fmt.get('ext', 'm4a'), 'filesize': filesize, 'vcodec': '✗', 'acodec': '✓', 'url': fmt_url})
             continue
         
-        # Video formats
         if height > 0:
-            # Find closest standard quality
             label = None
             for std_height, std_label in sorted(quality_map.items(), reverse=True):
                 if height >= std_height:
@@ -207,87 +153,42 @@ def format_qualities(formats, site='generic'):
                     break
             if not label:
                 label = f"{height}p"
-            
             if fps and fps > 30:
                 label += f" {int(fps)}fps"
-            
             if label in seen:
                 continue
             seen.add(label)
-            
-            video_formats.append({
-                'format_id': fmt_id,
-                'label': label,
-                'ext': ext,
-                'filesize': filesize,
-                'vcodec': '✓',
-                'acodec': '✓' if acodec != 'none' else '✗',
-                'url': fmt_url,
-                'height': height,
-                'fps': fps,
-            })
+            video_formats.append({'format_id': fmt_id, 'label': label, 'ext': ext, 'filesize': filesize, 'vcodec': '✓', 'acodec': '✓' if acodec != 'none' else '✗', 'url': fmt_url, 'height': height, 'fps': fps})
         elif tbr > 0:
-            # For formats without height (audio-only or unknown)
             label = f"{int(tbr)}k"
             if label not in seen:
                 seen.add(label)
-                video_formats.append({
-                    'format_id': fmt_id,
-                    'label': label,
-                    'ext': ext,
-                    'filesize': filesize,
-                    'vcodec': '✓' if vcodec != 'none' else '✗',
-                    'acodec': '✓' if acodec != 'none' else '✗',
-                    'url': fmt_url,
-                    'height': 0,
-                    'fps': None,
-                })
+                video_formats.append({'format_id': fmt_id, 'label': label, 'ext': ext, 'filesize': filesize, 'vcodec': '✓' if vcodec != 'none' else '✗', 'acodec': '✓' if acodec != 'none' else '✗', 'url': fmt_url, 'height': 0, 'fps': None})
     
-    # Sort by height (highest first)
     video_formats.sort(key=lambda x: x.get('height', 0), reverse=True)
     qualities.extend(video_formats)
-    
-    # Add audio format
     if audio_formats:
         qualities.append(audio_formats[0])
-    
     return qualities
 
 def extract_video_info(url, max_attempts=3):
-    """Extract video info with multiple attempts and fallbacks"""
     site = detect_site(url)
     ffmpeg_available = is_ffmpeg_available()
-    cookies_file = '/app/cookies.txt' if os.path.exists('/app/cookies.txt') else None
     
     logger.info(f"Extracting from {url[:80]}... (Site: {site})")
     
     for attempt in range(max_attempts):
         try:
-            # Try with different configurations
             if attempt == 0:
-                # First attempt: Standard extraction
-                ydl_opts = get_ydl_opts(site=site, cookies_file=cookies_file)
+                ydl_opts = get_ydl_opts(site=site)
             elif attempt == 1:
-                # Second attempt: With different player clients (for YouTube)
                 if site == 'youtube':
-                    ydl_opts = get_ydl_opts(site=site, cookies_file=cookies_file)
+                    ydl_opts = get_ydl_opts(site=site)
                     ydl_opts['extractor_args']['youtube']['player_client'] = 'web,ios,android,mweb'
                 else:
-                    ydl_opts = get_ydl_opts(site=site, cookies_file=cookies_file)
+                    ydl_opts = get_ydl_opts(site=site)
             else:
-                # Third attempt: Minimal options
-                ydl_opts = {
-                    'quiet': True,
-                    'no_warnings': True,
-                    'no_check_certificate': True,
-                    'noplaylist': True,
-                    'ignoreerrors': False,
-                    'user_agent': random.choice(USER_AGENTS),
-                    'socket_timeout': 30,
-                    'geo_bypass': True,
-                }
-                if cookies_file:
-                    ydl_opts['cookiefile'] = cookies_file
+                ydl_opts = {'quiet': True, 'no_warnings': True, 'no_check_certificate': True, 'noplaylist': True, 'ignoreerrors': False, 'user_agent': random.choice(USER_AGENTS), 'socket_timeout': 30, 'geo_bypass': True}
             
             logger.info(f"Attempt {attempt + 1}/{max_attempts}")
             
@@ -299,10 +200,8 @@ def extract_video_info(url, max_attempts=3):
                 
                 logger.info(f"✓ Success! Title: {info.get('title', 'Unknown')}")
                 
-                # Format qualities
                 formats = info.get('formats', [])
                 if not formats and info.get('url'):
-                    # Single format video
                     formats = [info]
                 
                 qualities = format_qualities(formats, site)
@@ -326,7 +225,6 @@ def extract_video_info(url, max_attempts=3):
             logger.error(f"Attempt {attempt + 1} failed: {e}")
             
             if attempt == max_attempts - 1:
-                # Final attempt failed - provide user-friendly error
                 if any(x in error_msg for x in ['private', 'unavailable', 'not found', 'does not exist']):
                     raise ValueError("Video not found or unavailable. Check the URL.")
                 elif any(x in error_msg for x in ['age', 'login', 'sign in', 'bot']):
@@ -352,27 +250,11 @@ def extract_video_info(url, max_attempts=3):
 
 @app.route('/')
 def home():
-    return jsonify({
-        'service': 'Professional Video Downloader API',
-        'version': '5.0.0',
-        'status': 'running',
-        'ffmpeg': is_ffmpeg_available(),
-        'supported_sites': ['YouTube', 'Instagram', 'Vimeo', 'Pinterest', 'Facebook', 'TikTok', 'Twitter'],
-        'endpoints': {
-            'get_info': 'POST /api/get-info',
-            'download': 'GET or POST /api/download',
-            'health': 'GET /health'
-        }
-    })
+    return jsonify({'service': 'Professional Video Downloader API', 'version': '5.1.0', 'status': 'running', 'ffmpeg': is_ffmpeg_available(), 'supported_sites': ['YouTube', 'Instagram', 'Vimeo', 'Pinterest', 'Facebook', 'TikTok', 'Twitter'], 'endpoints': {'get_info': 'POST /api/get-info', 'download': 'GET or POST /api/download', 'health': 'GET /health'}})
 
 @app.route('/health')
 def health_check():
-    return jsonify({
-        'status': 'healthy',
-        'ffmpeg': is_ffmpeg_available(),
-        'timestamp': time.time(),
-        'version': '5.0.0'
-    }), 200
+    return jsonify({'status': 'healthy', 'ffmpeg': is_ffmpeg_available(), 'timestamp': time.time(), 'version': '5.1.0'}), 200
 
 @app.route('/api/get-info', methods=['POST', 'OPTIONS'])
 def get_video_info():
@@ -383,18 +265,17 @@ def get_video_info():
     
     try:
         data = request.get_json(silent=True)
-        if not 
+        if data is None:
             return jsonify({'success': False, 'error': 'Invalid JSON request'}), 400
         
         video_url = data.get('url', '').strip()
-        if not video_url:
+        if video_url == '':
             return jsonify({'success': False, 'error': 'Video URL is required'}), 400
         
         parsed = urlparse(video_url)
-        if not parsed.scheme or not parsed.netloc:
+        if parsed.scheme == '' or parsed.netloc == '':
             return jsonify({'success': False, 'error': 'Invalid URL format. Must start with http:// or https://'}), 400
         
-        # SSRF protection
         blocked = ['localhost', '127.0.0.1', '192.168.', '10.', '172.16.', '172.17.', '172.18.', '172.19.', '172.20.', '172.21.', '172.22.', '172.23.', '172.24.', '172.25.', '172.26.', '172.27.', '172.28.', '172.29.', '172.30.', '172.31.', 'file://', 'ftp://', 'gopher://']
         if any(b in video_url.lower() for b in blocked):
             return jsonify({'success': False, 'error': 'This URL is not allowed for security reasons'}), 403
@@ -425,31 +306,29 @@ def download_video():
             format_id = request.args.get('format_id', 'best')
         else:
             data = request.get_json(silent=True)
-            if not 
+            if data is None:
                 return jsonify({'success': False, 'error': 'Invalid request'}), 400
             video_url = data.get('url', '').strip()
             format_id = data.get('format_id', 'best')
         
-        if not video_url:
+        if video_url == '':
             return jsonify({'success': False, 'error': 'Video URL is required'}), 400
         
         logger.info(f"Download: {video_url[:50]}... | format: {format_id}")
         
         site = detect_site(video_url)
-        cookies_file = '/app/cookies.txt' if os.path.exists('/app/cookies.txt') else None
         
         max_attempts = 3
         for attempt in range(max_attempts):
             try:
-                ydl_opts = get_ydl_opts(site=site, format_id=format_id, cookies_file=cookies_file)
+                ydl_opts = get_ydl_opts(site=site, format_id=format_id)
                 
                 with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                     info = ydl.extract_info(video_url, download=False)
                     
-                    if not info:
+                    if info is None:
                         raise ValueError("Failed to fetch video info")
                     
-                    # Find specific format
                     direct_url = None
                     selected_format = None
                     
@@ -459,7 +338,7 @@ def download_video():
                             selected_format = fmt
                             break
                     
-                    if not direct_url:
+                    if direct_url is None:
                         direct_url = info.get('url')
                         selected_format = info
                     
@@ -468,16 +347,7 @@ def download_video():
                         ext = selected_format.get('ext', 'mp4') if selected_format else 'mp4'
                         filesize = selected_format.get('filesize') if selected_format else info.get('filesize')
                         
-                        return jsonify({
-                            'success': True,
-                            'method': 'direct',
-                            'download_url': direct_url,
-                            'title': info.get('title'),
-                            'filename': f"{title}.{ext}",
-                            'ext': ext,
-                            'filesize': filesize,
-                            'hint': 'If download fails, try right-click → "Save link as..." or use a download manager.'
-                        })
+                        return jsonify({'success': True, 'method': 'direct', 'download_url': direct_url, 'title': info.get('title'), 'filename': f"{title}.{ext}", 'ext': ext, 'filesize': filesize, 'hint': 'If download fails, try right-click → "Save link as..." or use a download manager.'})
                     else:
                         raise ValueError("No download URL found")
                         
@@ -510,6 +380,6 @@ def server_error(e):
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 8000))
-    logger.info(f"🚀 Starting Professional Video Downloader v5.0.0 on port {port}")
+    logger.info(f"🚀 Starting Professional Video Downloader v5.1.0 on port {port}")
     logger.info(f"FFmpeg available: {is_ffmpeg_available()}")
     app.run(host='0.0.0.0', port=port, debug=False)
