@@ -30,5 +30,5 @@ downloads/
 temp/
 *.part
 
-# Docker (optional)
-!.dockerignore
+# ⚠️ IMPORTANT: Don't commit cookies to GitHub!
+cookies.txt
