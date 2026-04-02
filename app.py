@@ -1,6 +1,5 @@
 """
-🎬 Video Downloader - Hybrid Approach
-Works with IDM/Client-side download fallback
+🎬 Video Downloader - All Qualities + Direct Download
 """
 
 from flask import Flask, request, jsonify
@@ -49,20 +48,22 @@ def get_ydl_opts(site='generic'):
         'noplaylist': True,
         'ignoreerrors': False,
         'retries': 3,
+        'fragment_retries': 3,
         'socket_timeout': 30,
         'user_agent': random.choice(user_agents),
         'geo_bypass': True,
+        'extract_flat': False,
     }
     
     if site == 'youtube':
         opts.update({
-            'extractor_args': {'youtube': {'player_client': 'web,ios'}},
-            'http_headers': {'Accept': 'text/html', 'Accept-Language': 'en-US'}
+            'extractor_args': {'youtube': {'player_client': 'web,ios,android,mweb', 'player_skip': ['webpage']}},
+            'http_headers': {'Accept': 'text/html,application/xhtml+xml', 'Accept-Language': 'en-US,en;q=0.9'}
         })
     elif site == 'instagram':
         opts.update({
             'extractor_args': {'instagram': {'include_formats': True}},
-            'http_headers': {'Accept': '*/*'}
+            'http_headers': {'Accept': '*/*', 'X-IG-App-ID': '936619743392459'}
         })
     elif site == 'vimeo':
         opts.update({
@@ -73,6 +74,11 @@ def get_ydl_opts(site='generic'):
         opts.update({
             'extractor_args': {'tiktok': {}},
             'http_headers': {'User-Agent': 'Mozilla/5.0'}
+        })
+    elif site == 'facebook':
+        opts.update({
+            'extractor_args': {'facebook': {}},
+            'http_headers': {'Referer': 'https://www.facebook.com/'}
         })
     
     return opts
@@ -87,14 +93,25 @@ def sanitize_filename(filename):
 def is_ffmpeg_available():
     return shutil.which('ffmpeg') is not None
 
-def format_qualities(formats):
-    """Format ALL available qualities properly"""
+def format_qualities(formats, site='generic'):
+    """Extract ALL available qualities with proper labels"""
     qualities = []
     seen_labels = set()
-    standard_heights = [2160, 1440, 1080, 720, 480, 360, 240, 144]
+    
+    # Quality labels mapping
+    quality_labels = {
+        2160: '2160p 4K',
+        1440: '1440p 2K', 
+        1080: '1080p Full HD',
+        720: '720p HD',
+        480: '480p',
+        360: '360p',
+        240: '240p',
+        144: '144p',
+    }
     
     video_formats = {}
-    audio_format = None
+    audio_formats = []
     
     for fmt in formats:
         fmt_id = fmt.get('format_id')
@@ -102,69 +119,116 @@ def format_qualities(formats):
             continue
         
         height = fmt.get('height', 0)
+        width = fmt.get('width', 0)
         vcodec = fmt.get('vcodec', 'none')
         acodec = fmt.get('acodec', 'none')
         ext = fmt.get('ext', 'mp4')
         filesize = fmt.get('filesize') or fmt.get('filesize_approx', 0)
+        fps = fmt.get('fps')
+        tbr = fmt.get('tbr', 0)
         fmt_url = fmt.get('url')
+        protocol = fmt.get('protocol', 'https')
         
+        # Skip if no video and no audio
         if vcodec == 'none' and acodec == 'none':
             continue
         
+        # Audio only formats
         if vcodec == 'none' and acodec != 'none':
-            if audio_format is None:
-                audio_format = {
-                    'format_id': fmt_id,
-                    'label': 'Audio Only',
-                    'ext': ext,
-                    'filesize': filesize,
-                    'vcodec': '✗',
-                    'acodec': '✓',
-                    'url': fmt_url,
-                }
+            audio_label = 'Audio Only'
+            if tbr > 0:
+                audio_label = f"Audio Only {int(tbr)}k"
+            
+            audio_formats.append({
+                'format_id': fmt_id,
+                'label': audio_label,
+                'ext': ext,
+                'filesize': filesize,
+                'vcodec': '✗',
+                'acodec': '✓',
+                'url': fmt_url,
+                'protocol': protocol,
+            })
             continue
         
+        # Video formats
         if height > 0:
-            for std_h in standard_heights:
-                if height >= std_h:
-                    label = f"{std_h}p"
-                    if std_h == 1080:
-                        label = "1080p Full HD"
-                    elif std_h == 720:
-                        label = "720p HD"
-                    
-                    if label not in video_formats or height > video_formats[label].get('height', 0):
-                        video_formats[label] = {
-                            'format_id': fmt_id,
-                            'label': label,
-                            'ext': ext,
-                            'filesize': filesize,
-                            'vcodec': '✓',
-                            'acodec': '✓' if acodec != 'none' else '✗',
-                            'url': fmt_url,
-                            'height': height,
-                        }
+            # Find the best matching quality label
+            label = None
+            for std_height, std_label in sorted(quality_labels.items(), reverse=True):
+                if height >= std_height:
+                    label = std_label
                     break
+            
+            if not label:
+                label = f"{height}p"
+            
+            # Add FPS if available
+            if fps and fps > 30 and fps not in [30, 60]:
+                label += f" {int(fps)}fps"
+            
+            # Avoid duplicates - keep the best quality for each label
+            if label not in video_formats or height > video_formats[label].get('height', 0):
+                video_formats[label] = {
+                    'format_id': fmt_id,
+                    'label': label,
+                    'ext': ext,
+                    'filesize': filesize,
+                    'vcodec': '✓',
+                    'acodec': '✓' if acodec != 'none' else '✗',
+                    'url': fmt_url,
+                    'height': height,
+                    'width': width,
+                    'fps': fps,
+                    'protocol': protocol,
+                }
+        elif tbr > 0:
+            # For formats without height (audio-only or unknown video)
+            label = f"{int(tbr)}k"
+            if label not in seen_labels:
+                seen_labels.add(label)
+                video_formats[label] = {
+                    'format_id': fmt_id,
+                    'label': label,
+                    'ext': ext,
+                    'filesize': filesize,
+                    'vcodec': '✓' if vcodec != 'none' else '✗',
+                    'acodec': '✓' if acodec != 'none' else '✗',
+                    'url': fmt_url,
+                    'height': 0,
+                    'width': 0,
+                    'fps': None,
+                    'protocol': protocol,
+                }
     
-    sorted_labels = sorted(video_formats.keys(), 
-                          key=lambda x: int(''.join(filter(str.isdigit, x)) or '0'), 
-                          reverse=True)
+    # Sort video formats by height (highest first)
+    sorted_video = sorted(
+        video_formats.values(),
+        key=lambda x: x.get('height', 0),
+        reverse=True
+    )
     
-    for label in sorted_labels:
-        qualities.append(video_formats[label])
+    qualities.extend(sorted_video)
     
-    if audio_format:
-        qualities.append(audio_format)
+    # Add unique audio formats
+    seen_audio = set()
+    for audio in audio_formats:
+        if audio['label'] not in seen_audio:
+            seen_audio.add(audio['label'])
+            qualities.append(audio)
     
     return qualities
 
 def extract_with_retry(url, site, max_tries=3):
+    """Try extraction multiple times"""
+    
     for attempt in range(max_tries):
         try:
             opts = get_ydl_opts(site)
             
+            # Different strategies
             if attempt == 1 and site == 'youtube':
-                opts['extractor_args']['youtube']['player_client'] = 'web,ios,android'
+                opts['extractor_args']['youtube']['player_client'] = 'web,ios,android,mweb'
             elif attempt == 2:
                 opts = {
                     'quiet': True,
@@ -188,18 +252,11 @@ def extract_with_retry(url, site, max_tries=3):
                 if not formats and info.get('url'):
                     formats = [info]
                 
-                qualities = format_qualities(formats)
+                logger.info(f"Found {len(formats)} formats")
                 
-                # YouTube-specific note
-                youtube_note = None
-                workarounds = []
-                if site == 'youtube' and len(qualities) < 3:
-                    youtube_note = 'YouTube may require authentication. If download fails:'
-                    workarounds = [
-                        'Use IDM/ADM with the direct URL',
-                        'Wait 1-2 hours and try again',
-                        'Try a different video URL'
-                    ]
+                qualities = format_qualities(formats, site)
+                
+                logger.info(f"Formatted {len(qualities)} qualities")
                 
                 return {
                     'success': True,
@@ -207,11 +264,12 @@ def extract_with_retry(url, site, max_tries=3):
                     'thumbnail': info.get('thumbnail', ''),
                     'duration': info.get('duration', 0),
                     'uploader': info.get('uploader', 'Unknown'),
+                    'view_count': info.get('view_count'),
                     'qualities': qualities,
                     'ffmpeg_available': is_ffmpeg_available(),
                     'platform': site,
-                    'youtube_note': youtube_note,
-                    'workarounds': workarounds,
+                    'total_formats': len(formats),
+                    'total_qualities': len(qualities),
                 }
                 
         except Exception as e:
@@ -221,7 +279,7 @@ def extract_with_retry(url, site, max_tries=3):
             if attempt == max_tries - 1:
                 if 'private' in error_msg or 'unavailable' in error_msg:
                     raise ValueError("Video is private or unavailable")
-                elif 'bot' in error_msg or 'authentication' in error_msg or 'login' in error_msg:
+                elif 'bot' in error_msg or 'authentication' in error_msg or 'login' in error_msg or 'sign in' in error_msg:
                     raise ValueError("Site requires authentication. Try again later.")
                 elif 'region' in error_msg or 'blocked' in error_msg:
                     raise ValueError("Video not available in your region")
@@ -240,15 +298,14 @@ def extract_with_retry(url, site, max_tries=3):
 def home():
     return jsonify({
         'service': 'Video Downloader',
-        'version': '6.1.0',
+        'version': '7.0.0',
         'status': 'running',
-        'supported': ['Instagram', 'TikTok', 'Facebook', 'Vimeo (public)', 'YouTube (limited)'],
-        'note': 'For YouTube: Use IDM/ADM with direct URL if backend download fails'
+        'supported': ['Instagram', 'TikTok', 'Facebook', 'Vimeo', 'YouTube (limited)'],
     })
 
 @app.route('/health')
 def health():
-    return jsonify({'status': 'healthy', 'version': '6.1.0'}), 200
+    return jsonify({'status': 'healthy', 'version': '7.0.0'}), 200
 
 @app.route('/api/get-info', methods=['POST', 'OPTIONS'])
 def get_info():
@@ -330,8 +387,6 @@ def download():
                     'download_url': download_url,
                     'title': info.get('title'),
                     'filename': f"{title}.{ext}",
-                    'hint': 'If direct download fails: Right-click URL → Copy → Paste in IDM/ADM',
-                    'idm_tip': 'IDM users: Use the direct URL with IDM for best results'
                 })
             else:
                 raise ValueError("No URL found")
