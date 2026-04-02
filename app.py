@@ -1,5 +1,5 @@
 """
-🎬 Video Downloader - Maximum Compatibility
+🎬 Video Downloader - Fixed: No Warnings + No Hanging
 Best effort without cookies
 """
 
@@ -7,6 +7,7 @@ from flask import Flask, request, jsonify, Response, stream_with_context
 from flask_cors import CORS
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
+from flask_limiter.storage import MemoryStorage
 import yt_dlp
 import logging
 import os
@@ -16,13 +17,36 @@ import random
 import requests
 from urllib.parse import urlparse
 
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[logging.StreamHandler()]
+)
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
-CORS(app, resources={r"/api/*": {"origins": "*", "methods": ["GET", "POST", "OPTIONS"]}})
-limiter = Limiter(app=app, key_func=get_remote_address, default_limits=["100 per day", "20 per hour"])
+
+# Enable CORS
+CORS(app, resources={
+    r"/api/*": {
+        "origins": "*",
+        "methods": ["GET", "POST", "OPTIONS"],
+        "allow_headers": ["Content-Type"]
+    }
+})
+
+# Rate limiting with explicit memory storage (fixes warning)
+limiter = Limiter(
+    app=app,
+    key_func=get_remote_address,
+    default_limits=["100 per day", "20 per hour"],
+    storage_uri="memory://",  # ✅ Explicit storage - fixes warning
+    strategy="fixed-window"
+)
+
 app.config['MAX_CONTENT_LENGTH'] = 512 * 1024 * 1024
+app.config['SEND_FILE_MAX_AGE_DEFAULT'] = 0
 
 def detect_site(url):
     url_lower = url.lower()
@@ -153,7 +177,7 @@ def format_qualities(formats):
     return qualities
 
 def extract_with_ytdlp(url, site, max_tries=2):
-    """Extract with better error handling"""
+    """Extract with better error handling and timeout"""
     for attempt in range(max_tries):
         try:
             opts = get_ydl_opts(site)
@@ -189,11 +213,10 @@ def extract_with_ytdlp(url, site, max_tries=2):
             logger.error(f"Attempt {attempt + 1} failed: {e}")
             
             if attempt == max_tries - 1:
-                # User-friendly errors
                 if 'private' in error_msg or 'unavailable' in error_msg:
                     raise ValueError("Video is private or unavailable")
                 elif 'bot' in error_msg or 'authentication' in error_msg or 'sign in' in error_msg:
-                    raise ValueError(f"{site.title()} is blocking automated requests. Try again later or use a different video.")
+                    raise ValueError(f"{site.title()} is blocking automated requests. Try again later.")
                 elif 'region' in error_msg or 'blocked' in error_msg:
                     raise ValueError("Video not available in your region")
                 elif '403' in error_msg or 'forbidden' in error_msg:
@@ -209,17 +232,17 @@ def extract_with_ytdlp(url, site, max_tries=2):
 def home():
     return jsonify({
         'service': 'Video Downloader',
-        'version': '13.0.0',
+        'version': '14.0.0',
         'status': 'running',
         'best_supported': ['Instagram', 'TikTok', 'Twitter', 'Pinterest'],
-        'limited': ['YouTube (requires cookies)', 'Facebook (requires cookies)', 'Vimeo (public only)'],
+        'limited': ['YouTube (some videos)', 'Vimeo (public only)'],
         'note': 'Some sites block automated requests from datacenter IPs'
     })
 
 @app.route('/health')
 @limiter.limit("10 per minute")
 def health():
-    return jsonify({'status': 'healthy', 'version': '13.0.0'}), 200
+    return jsonify({'status': 'healthy', 'version': '14.0.0'}), 200
 
 @app.route('/api/get-info', methods=['POST', 'OPTIONS'])
 @limiter.limit("30 per hour per user")
@@ -314,6 +337,7 @@ def download():
 @app.route('/api/proxy-download')
 @limiter.limit("50 per hour per user")
 def proxy_download():
+    """Proxy download with proper streaming and timeout"""
     try:
         video_url = request.args.get('url')
         filename = request.args.get('filename', 'video.mp4')
@@ -321,34 +345,88 @@ def proxy_download():
         if not video_url:
             return jsonify({'error': 'URL required'}), 400
         
-        response = requests.get(video_url, stream=True, headers={
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-        }, timeout=30)
+        logger.info(f"Proxy download: {video_url[:80]}...")
+        
+        # Stream with proper timeout and headers
+        response = requests.get(
+            video_url,
+            stream=True,
+            headers={
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                'Accept': '*/*',
+            },
+            timeout=60  # ✅ Longer timeout to prevent hanging
+        )
         
         if response.status_code != 200:
             return jsonify({'error': f'Failed: {response.status_code}'}), 500
         
         content_type = response.headers.get('Content-Type', 'video/mp4')
+        content_length = response.headers.get('Content-Length')
         
         def generate():
-            for chunk in response.iter_content(chunk_size=8192):
-                if chunk:
-                    yield chunk
+            try:
+                for chunk in response.iter_content(chunk_size=8192):
+                    if chunk:
+                        yield chunk
+            except Exception as e:
+                logger.error(f"Streaming error: {e}")
+        
+        headers = {
+            'Content-Disposition': f'attachment; filename="{filename}"',
+            'Content-Type': content_type,
+            'Cache-Control': 'no-cache',
+            'Access-Control-Allow-Origin': '*',
+            'X-Accel-Buffering': 'no',  # ✅ Disable Nginx buffering (Render uses Nginx)
+        }
+        
+        if content_length:
+            headers['Content-Length'] = content_length
         
         return Response(
             stream_with_context(generate()),
             mimetype=content_type,
-            headers={
-                'Content-Disposition': f'attachment; filename="{filename}"',
-                'Content-Type': content_type,
-                'Cache-Control': 'no-cache',
-                'Access-Control-Allow-Origin': '*',
-            }
+            headers=headers
         )
         
+    except requests.exceptions.Timeout:
+        logger.error("Proxy download timeout")
+        return jsonify({'error': 'Download timeout. Try again or use a smaller video.'}), 504
+    except requests.exceptions.ConnectionError:
+        logger.error("Proxy download connection error")
+        return jsonify({'error': 'Connection failed. The video URL may be expired.'}), 502
     except Exception as e:
         logger.error(f"Proxy error: {e}")
         return jsonify({'error': f'Proxy failed: {str(e)[:100]}'}), 500
+
+@app.route('/api/proxy-image')
+def proxy_image():
+    """Proxy for thumbnails"""
+    try:
+        image_url = request.args.get('url')
+        if not image_url:
+            return jsonify({'error': 'URL required'}), 400
+        
+        response = requests.get(image_url, headers={
+            'User-Agent': 'Mozilla/5.0',
+        }, timeout=10)
+        
+        if response.status_code == 200:
+            content_type = response.headers.get('Content-Type', 'image/jpeg')
+            return Response(
+                response.content,
+                mimetype=content_type,
+                headers={
+                    'Cache-Control': 'public, max-age=86400',
+                    'Access-Control-Allow-Origin': '*',
+                }
+            )
+        else:
+            return jsonify({'error': 'Failed to fetch image'}), 500
+            
+    except Exception as e:
+        logger.error(f"Image proxy error: {e}")
+        return jsonify({'error': f'Image failed: {str(e)[:80]}'}), 500
 
 @app.errorhandler(404)
 def not_found(e):
@@ -356,7 +434,7 @@ def not_found(e):
 
 @app.errorhandler(429)
 def rate_limit(e):
-    return jsonify({'error': 'Too many requests. Please wait.'}), 429
+    return jsonify({'error': 'Too many requests. Please wait a few minutes.'}), 429
 
 @app.errorhandler(500)
 def server_error(e):
@@ -365,5 +443,5 @@ def server_error(e):
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 8000))
-    logger.info(f"🚀 Starting v13.0.0 on port {port}")
+    logger.info(f"🚀 Starting Video Downloader v14.0.0 on port {port}")
     app.run(host='0.0.0.0', port=port, debug=False)
