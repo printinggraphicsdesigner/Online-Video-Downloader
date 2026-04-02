@@ -1,10 +1,10 @@
 """
-🎬 Video Downloader Backend - Flask + yt-dlp + FFmpeg Support
+🎬 Video Downloader Backend - SaveFrom.net Style
 WordPress Frontend + Render Backend (Docker)
-Version: 3.1.0 - All Platforms Fixed + GET Download Support
+Version: 4.0.0 - Professional Downloader
 """
 
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, Response, stream_with_context, redirect
 from flask_cors import CORS
 import yt_dlp
 import logging
@@ -13,7 +13,9 @@ import re
 import time
 import shutil
 import random
-from urllib.parse import urlparse
+import requests
+from urllib.parse import urlparse, quote
+from io import BytesIO
 
 # Configure logging
 logging.basicConfig(
@@ -34,8 +36,8 @@ CORS(app, resources={
 })
 
 # Configuration
-app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024
-app.config['SEND_FILE_MAX_AGE_DEFAULT'] = 300
+app.config['MAX_CONTENT_LENGTH'] = 512 * 1024 * 1024  # 512MB max
+app.config['SEND_FILE_MAX_AGE_DEFAULT'] = 0
 
 # Multiple User-Agents for rotation
 USER_AGENTS = [
@@ -65,7 +67,7 @@ def detect_site(url):
         return 'generic'
 
 def get_ydl_opts(download_mode=False, format_id=None, prefer_merged=True, site='generic'):
-    """Generate yt-dlp options with platform-specific bypass"""
+    """Generate yt-dlp options with SaveFrom.net style bypass"""
     
     # Platform-specific options
     extractor_args = {}
@@ -73,9 +75,10 @@ def get_ydl_opts(download_mode=False, format_id=None, prefer_merged=True, site='
     if site == 'youtube':
         extractor_args = {
             'youtube': {
-                'player_client': 'web,ios',
+                'player_client': 'web,web_embedded,ios,android,mweb',
                 'player_skip': ['webpage'],
-                'lang': 'en'
+                'lang': 'en',
+                'extractor_retries': 3,
             }
         }
     elif site == 'instagram':
@@ -88,6 +91,7 @@ def get_ydl_opts(download_mode=False, format_id=None, prefer_merged=True, site='
         extractor_args = {
             'vimeo': {
                 'force_noplaylist': True,
+                'referer': 'https://vimeo.com/'
             }
         }
     elif site == 'pinterest':
@@ -101,27 +105,37 @@ def get_ydl_opts(download_mode=False, format_id=None, prefer_merged=True, site='
         'extract_flat': False if not download_mode else 'in_playlist',
         'user_agent': random.choice(USER_AGENTS),
         'referer': 'https://www.google.com/',
-        'socket_timeout': 30,
-        'retries': 3,
+        'socket_timeout': 60,
+        'retries': 5,
+        'fragment_retries': 3,
         'no_check_certificate': True,
         'noplaylist': True,
         'ignoreerrors': False,
+        'extractor_retries': 3,
         
         # Platform-specific extractor args
         'extractor_args': extractor_args,
         
-        # Additional HTTP Headers to bypass bot detection
+        # SaveFrom.net style headers
         'http_headers': {
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-            'Accept-Language': 'en-us,en;q=0.5',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.5',
+            'Accept-Encoding': 'gzip, deflate, br',
+            'Connection': 'keep-alive',
+            'Upgrade-Insecure-Requests': '1',
+            'Sec-Fetch-Dest': 'document',
             'Sec-Fetch-Mode': 'navigate',
             'Sec-Fetch-Site': 'none',
             'Sec-Fetch-User': '?1',
-            'Upgrade-Insecure-Requests': '1',
+            'Cache-Control': 'max-age=0',
         },
         
         # Cookie handling (if cookies.txt exists)
         'cookiefile': '/app/cookies.txt',
+        
+        # Geo bypass
+        'geo_bypass': True,
+        'geo_bypass_country': 'US',
     }
     
     if download_mode:
@@ -222,27 +236,26 @@ def format_instagram_qualities(formats):
     return qualities
 
 def extract_video_info(url):
-    """Extract video metadata and available formats"""
+    """Extract video metadata and available formats - SaveFrom.net style"""
     site = detect_site(url)
-    ydl_opts = get_ydl_opts(download_mode=False, site=site)
-    ffmpeg_available = is_ffmpeg_available()
     
-    logger.info(f"Starting extraction for: {url[:80]}... (Site: {site})")
-    logger.info(f"FFmpeg available: {ffmpeg_available}")
+    # Try multiple times with different options
+    max_attempts = 3 if site in ['youtube', 'vimeo'] else 2
     
-    # Retry logic for YouTube
-    max_retries = 2 if site == 'youtube' else 1
-    
-    for attempt in range(max_retries):
+    for attempt in range(max_attempts):
         try:
+            ydl_opts = get_ydl_opts(download_mode=False, site=site)
+            ffmpeg_available = is_ffmpeg_available()
+            
+            logger.info(f"Attempt {attempt + 1}/{max_attempts} for: {url[:80]}... (Site: {site})")
+            
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                logger.info(f"Attempt {attempt + 1}/{max_retries}")
                 info = ydl.extract_info(url, download=False)
                 
                 if not info:
                     raise ValueError("No information returned from yt-dlp")
                 
-                logger.info(f"Extraction successful! Title: {info.get('title', 'Unknown')}")
+                logger.info(f"✓ Extraction successful! Title: {info.get('title', 'Unknown')}")
                 logger.info(f"Found {len(info.get('formats', []))} formats")
                 
                 # Format qualities based on site
@@ -265,6 +278,7 @@ def extract_video_info(url):
                         fps = fmt.get('fps')
                         tbr = fmt.get('tbr')
                         protocol = fmt.get('protocol', 'https')
+                        fmt_url = fmt.get('url')
                         
                         if vcodec == 'none' and acodec == 'none':
                             continue
@@ -312,7 +326,7 @@ def extract_video_info(url):
                             'acodec': '✓' if acodec and acodec != 'none' else '✗',
                             'fps': fps,
                             'protocol': protocol,
-                            'url': fmt.get('url'),
+                            'url': fmt_url,
                             'needs_ffmpeg': needs_merge and not ffmpeg_available,
                             'note': 'Requires FFmpeg' if needs_merge and not ffmpeg_available else None
                         })
@@ -342,7 +356,7 @@ def extract_video_info(url):
             error_msg = str(e).lower()
             logger.error(f"Attempt {attempt + 1} failed: {e}")
             
-            if attempt == max_retries - 1:
+            if attempt == max_attempts - 1:
                 if 'private' in error_msg:
                     raise ValueError("This video is private. Please use a public video.")
                 elif 'unavailable' in error_msg or 'not found' in error_msg or 'does not exist' in error_msg:
@@ -361,17 +375,19 @@ def extract_video_info(url):
                     raise ValueError("This video requires YouTube Premium or purchase.")
                 elif '403' in error_msg or 'forbidden' in error_msg:
                     raise ValueError("Access forbidden. This site may be blocking automated requests. Try again later.")
+                elif 'config_url' in error_msg or 'keyerror' in error_msg:
+                    raise ValueError("Failed to extract video data. This video may be private or restricted.")
                 else:
                     raise ValueError(f"Failed to extract video: {str(e)[:150]}")
             
-            time.sleep(1)
+            time.sleep(2 ** attempt)
 
 @app.route('/')
 def home():
     """Health check / info endpoint"""
     return jsonify({
         'service': 'Video Downloader API',
-        'version': '3.1.0',
+        'version': '4.0.0',
         'status': 'running',
         'ffmpeg': is_ffmpeg_available(),
         'endpoints': {
@@ -388,16 +404,12 @@ def health_check():
         'status': 'healthy',
         'ffmpeg': is_ffmpeg_available(),
         'timestamp': time.time(),
-        'version': '3.1.0'
+        'version': '4.0.0'
     }), 200
 
 @app.route('/api/get-info', methods=['POST', 'OPTIONS'])
 def get_video_info():
-    """
-    Extract video info and available qualities
-    Request: {"url": "https://..."}
-    Response: {success, title, thumbnail, qualities: [...], ffmpeg_available: bool}
-    """
+    """Extract video info and available qualities"""
     if request.method == 'OPTIONS':
         return '', 204
     
@@ -406,7 +418,7 @@ def get_video_info():
     try:
         data = request.get_json(silent=True)
         
-        if not data:
+        if not 
             return jsonify({'success': False, 'error': 'Invalid JSON request'}), 400
         
         video_url = data.get('url', '').strip()
@@ -450,6 +462,8 @@ def get_video_info():
             return jsonify({'success': False, 'error': 'Video removed due to copyright claim'}), 403
         elif '403' in error_msg or 'forbidden' in error_msg:
             return jsonify({'success': False, 'error': 'Access forbidden. This site may be blocking automated requests.'}), 403
+        elif 'config_url' in error_msg or 'keyerror' in error_msg:
+            return jsonify({'success': False, 'error': 'Failed to extract video data. This video may be private or restricted.'}), 500
         else:
             return jsonify({'success': False, 'error': f'Failed to fetch video: {str(e)[:150]}'}), 500
     except Exception as e:
@@ -459,9 +473,8 @@ def get_video_info():
 @app.route('/api/download', methods=['GET', 'POST', 'OPTIONS'])
 def download_video():
     """
-    Generate download link - Supports both GET and POST
-    GET: For direct browser download (WordPress frontend)
-    POST: For API requests
+    Generate download link - SaveFrom.net style
+    Supports both GET and POST
     """
     if request.method == 'OPTIONS':
         return '', 204
@@ -471,9 +484,9 @@ def download_video():
         if request.method == 'GET':
             video_url = request.args.get('url', '').strip()
             format_id = request.args.get('format_id', 'best')
-        else:  # POST
+        else:
             data = request.get_json(silent=True)
-            if not data:
+            if not 
                 return jsonify({'success': False, 'error': 'Invalid request'}), 400
             video_url = data.get('url', '').strip()
             format_id = data.get('format_id', 'best')
@@ -484,50 +497,56 @@ def download_video():
         logger.info(f"Download request: {video_url[:50]}... | format: {format_id}")
         
         site = detect_site(video_url)
-        ydl_opts = get_ydl_opts(download_mode=True, format_id=format_id, site=site)
         
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(video_url, download=False)
-            
-            if not info:
-                return jsonify({'success': False, 'error': 'Failed to fetch video info'}), 500
-            
-            # Find the specific format
-            direct_url = None
-            selected_format = None
-            
-            for fmt in info.get('formats', []):
-                if fmt.get('format_id') == format_id:
-                    direct_url = fmt.get('url')
-                    selected_format = fmt
-                    break
-            
-            if not direct_url:
-                direct_url = info.get('url')
-                selected_format = info
-            
-            if direct_url:
-                title = sanitize_filename(info.get('title', 'video'))
-                ext = selected_format.get('ext', 'mp4') if selected_format else 'mp4'
-                filesize = selected_format.get('filesize') if selected_format else info.get('filesize')
+        # Try multiple times
+        max_attempts = 3
+        for attempt in range(max_attempts):
+            try:
+                ydl_opts = get_ydl_opts(download_mode=True, format_id=format_id, site=site)
                 
-                return jsonify({
-                    'success': True,
-                    'method': 'direct',
-                    'download_url': direct_url,
-                    'title': info.get('title'),
-                    'filename': f"{title}.{ext}",
-                    'ext': ext,
-                    'filesize': filesize,
-                    'hint': 'If download fails, try right-click → "Save link as..." or use a download manager.'
-                })
-            else:
-                return jsonify({
-                    'success': False,
-                    'error': 'Direct download not available for this format/platform.',
-                    'hint': 'Try a different quality (720p or lower) or use the direct URL if available.',
-                    'ffmpeg_note': 'This format may require FFmpeg merging.'
-                }), 400
+                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                    info = ydl.extract_info(video_url, download=False)
+                    
+                    if not info:
+                        raise ValueError("Failed to fetch video info")
+                    
+                    # Find the specific format
+                    direct_url = None
+                    selected_format = None
+                    
+                    for fmt in info.get('formats', []):
+                        if fmt.get('format_id') == format_id:
+                            direct_url = fmt.get('url')
+                            selected_format = fmt
+                            break
+                    
+                    if not direct_url:
+                        direct_url = info.get('url')
+                        selected_format = info
+                    
+                    if direct_url:
+                        title = sanitize_filename(info.get('title', 'video'))
+                        ext = selected_format.get('ext', 'mp4') if selected_format else 'mp4'
+                        filesize = selected_format.get('filesize') if selected_format else info.get('filesize')
+                        
+                        return jsonify({
+                            'success': True,
+                            'method': 'direct',
+                            'download_url': direct_url,
+                            'title': info.get('title'),
+                            'filename': f"{title}.{ext}",
+                            'ext': ext,
+                            'filesize': filesize,
+                            'hint': 'If download fails, try right-click → "Save link as..." or use a download manager.'
+                        })
+                    else:
+                        raise ValueError("No download URL found")
+                        
+            except Exception as e:
+                logger.error(f"Download attempt {attempt + 1} failed: {e}")
+                if attempt == max_attempts - 1:
+                    raise
+                time.sleep(2 ** attempt)
             
     except yt_dlp.utils.DownloadError as e:
         logger.error(f"Download error: {e}")
@@ -556,6 +575,6 @@ def server_error(e):
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 8000))
-    logger.info(f"🚀 Starting Video Downloader v3.1.0 on port {port}")
+    logger.info(f"🚀 Starting Video Downloader v4.0.0 on port {port}")
     logger.info(f"FFmpeg available: {is_ffmpeg_available()}")
     app.run(host='0.0.0.0', port=port, debug=False)
