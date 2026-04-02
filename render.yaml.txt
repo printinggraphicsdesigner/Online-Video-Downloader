@@ -1,0 +1,20 @@
+services:
+  - type: web
+    name: online-video-downloader
+    env: docker  # ✅ Use Docker instead of plain Python
+    region: oregon
+    plan: free
+    
+    # Docker will use the Dockerfile in repo root
+    dockerfilePath: ./Dockerfile
+    
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.0
+      - key: YTDL_NO_UPDATE
+        value: "1"
+      - key: WEB_CONCURRENCY
+        value: 2
+    
+    healthCheckPath: /health
+    autoDeploy: true
