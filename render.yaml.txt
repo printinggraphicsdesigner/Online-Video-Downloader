@@ -1,16 +1,12 @@
+# render.yaml
 services:
   - type: web
     name: online-video-downloader
-    env: docker  # ✅ Use Docker instead of plain Python
-    region: oregon
-    plan: free
-    
-    # Docker will use the Dockerfile in repo root
-    dockerfilePath: ./Dockerfile
+    env: docker  # ← ✅ Docker মোড ফোর্স করুন
+    dockerfilePath: ./Dockerfile  # ← ✅ Dockerfile পাথ
+    # buildCommand/startCommand লাগবে না Docker মোডে!
     
     envVars:
-      - key: PYTHON_VERSION
-        value: 3.11.0
       - key: YTDL_NO_UPDATE
         value: "1"
       - key: WEB_CONCURRENCY
