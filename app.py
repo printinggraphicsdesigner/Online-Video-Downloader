@@ -1,6 +1,6 @@
 """
-🎬 Professional Video Downloader - No Cookies Required
-Supports: YouTube, Instagram, TikTok, Facebook, Vimeo, Twitter, Pinterest
+🎬 Professional Video Downloader - All Sites Fixed
+Supports: YouTube, Instagram, TikTok, Facebook, Vimeo, Twitter, Pinterest, Dailymotion
 """
 
 from flask import Flask, request, jsonify, Response, stream_with_context
@@ -40,13 +40,16 @@ limiter = Limiter(
 
 app.config['MAX_CONTENT_LENGTH'] = 512 * 1024 * 1024
 
-# Invidious instances for YouTube (no cookies needed)
+# Invidious instances for YouTube (updated list)
 INVIDIOUS_INSTANCES = [
     'https://vid.puffyan.us',
     'https://invidious.flokinet.to',
     'https://yewtu.be',
     'https://inv.nadeko.net',
     'https://invidious.nerdvpn.de',
+    'https://invidious.projectsegfau.lt',
+    'https://inv.tux.pizza',
+    'https://invidious.slipfox.xyz',
 ]
 
 def detect_site(url):
@@ -61,6 +64,8 @@ def detect_site(url):
         return 'tiktok'
     elif 'facebook.com' in url_lower or 'fb.watch' in url_lower or 'fb.com' in url_lower:
         return 'facebook'
+    elif 'dailymotion.com' in url_lower:
+        return 'dailymotion'
     elif 'pinterest.com' in url_lower or 'pin.it' in url_lower:
         return 'pinterest'
     elif 'twitter.com' in url_lower or 'x.com' in url_lower:
@@ -87,14 +92,15 @@ def extract_youtube_via_invidious(video_id):
             logger.info(f"Trying Invidious: {instance}")
             api_url = f"{instance}/api/v1/videos/{video_id}"
             response = requests.get(api_url, timeout=15, headers={
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                'Accept': 'application/json',
             })
             
             if response.status_code == 200:
                 data = response.json()
                 
-                if 'error' in data:
-                    logger.warning(f"Invidious error: {data['error']}")
+                if 'error' in data or not data:
+                    logger.warning(f"Invidious error: {data.get('error', 'Empty response')}")
                     continue
                 
                 qualities = []
@@ -107,7 +113,6 @@ def extract_youtube_via_invidious(video_id):
                         if fmt.get('type', '').startswith('video'):
                             height = fmt.get('height', 0)
                             if height >= 144:
-                                # Find standard quality label
                                 label_map = {
                                     2160: '2160p 4K',
                                     1440: '1440p 2K',
@@ -128,7 +133,6 @@ def extract_youtube_via_invidious(video_id):
                                 if not label:
                                     label = f"{height}p"
                                 
-                                # Keep best quality for each label
                                 if label not in video_formats or height > video_formats[label].get('height', 0):
                                     video_formats[label] = {
                                         'format_id': f"invidious_{fmt.get('itag', height)}",
@@ -142,7 +146,6 @@ def extract_youtube_via_invidious(video_id):
                                         'fps': fmt.get('fps'),
                                     }
                     
-                    # Add to qualities sorted by height
                     for label in sorted(video_formats.keys(), 
                                        key=lambda x: int(''.join(filter(str.isdigit, x)) or '0'), 
                                        reverse=True):
@@ -163,7 +166,6 @@ def extract_youtube_via_invidious(video_id):
                         })
                         break
                 
-                # Get thumbnail
                 thumbnail = ''
                 if data.get('videoThumbnails'):
                     thumbnail = data['videoThumbnails'][0].get('url', '')
@@ -190,7 +192,7 @@ def extract_youtube_via_invidious(video_id):
     return None
 
 def get_ydl_opts(site='generic'):
-    """Get yt-dlp options for non-YouTube sites"""
+    """Get yt-dlp options for all sites"""
     user_agents = [
         'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36',
         'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36',
@@ -203,18 +205,30 @@ def get_ydl_opts(site='generic'):
         'no_check_certificate': True,
         'noplaylist': True,
         'ignoreerrors': False,
-        'retries': 3,
-        'fragment_retries': 3,
-        'socket_timeout': 30,
+        'retries': 5,
+        'fragment_retries': 5,
+        'socket_timeout': 60,
         'user_agent': random.choice(user_agents),
         'geo_bypass': True,
         'extract_flat': False,
+        # Handle redirects
+        'follow_redirects': True,
+        # Better headers to avoid bot detection
+        'http_headers': {
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            'Accept-Language': 'en-us,en;q=0.5',
+            'Sec-Fetch-Mode': 'navigate',
+            'Sec-Fetch-Site': 'none',
+        },
     }
     
     if site == 'instagram':
         opts.update({
             'extractor_args': {'instagram': {'include_formats': True}},
-            'http_headers': {'Accept': '*/*'}
+            'http_headers': {
+                'Accept': '*/*',
+                'X-IG-App-ID': '936619743392459',
+            }
         })
     elif site == 'vimeo':
         opts.update({
@@ -229,7 +243,18 @@ def get_ydl_opts(site='generic'):
     elif site == 'facebook':
         opts.update({
             'extractor_args': {'facebook': {}},
-            'http_headers': {'Referer': 'https://www.facebook.com/'}
+            'http_headers': {
+                'Referer': 'https://www.facebook.com/',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            }
+        })
+    elif site == 'dailymotion':
+        opts.update({
+            'extractor_args': {'dailymotion': {}},
+            'http_headers': {
+                'Referer': 'https://www.dailymotion.com/',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            }
         })
     elif site == 'pinterest':
         opts.update({
@@ -269,9 +294,11 @@ def format_qualities(formats):
         fps = fmt.get('fps')
         fmt_url = fmt.get('url')
         
+        # Skip if no video and no audio
         if vcodec == 'none' and acodec == 'none':
             continue
         
+        # Audio only
         if vcodec == 'none' and acodec != 'none':
             audio_formats.append({
                 'format_id': fmt_id, 'label': 'Audio Only', 'ext': ext,
@@ -280,7 +307,8 @@ def format_qualities(formats):
             })
             continue
         
-        if height > 0:
+        # Video formats - only include if has both video and audio (avoid corrupt files)
+        if height > 0 and vcodec != 'none' and acodec != 'none':
             label = None
             for std_height, std_label in sorted(quality_labels.items(), reverse=True):
                 if height >= std_height:
@@ -295,20 +323,21 @@ def format_qualities(formats):
                 video_formats[label] = {
                     'format_id': fmt_id, 'label': label, 'ext': ext,
                     'filesize': filesize, 'vcodec': '✓',
-                    'acodec': '✓' if acodec != 'none' else '✗',
+                    'acodec': '✓',  # Only include if has audio
                     'url': fmt_url, 'height': height, 'fps': fps,
                 }
     
     sorted_video = sorted(video_formats.values(), key=lambda x: x.get('height', 0), reverse=True)
     qualities.extend(sorted_video)
     
-    if audio_formats:
+    # Add audio if no video formats found
+    if not qualities and audio_formats:
         qualities.append(audio_formats[0])
     
     return qualities
 
-def extract_with_ytdlp(url, site, max_tries=2):
-    """Extract using yt-dlp (for non-YouTube sites)"""
+def extract_with_ytdlp(url, site, max_tries=3):
+    """Extract using yt-dlp with better error handling"""
     for attempt in range(max_tries):
         try:
             opts = get_ydl_opts(site)
@@ -338,18 +367,30 @@ def extract_with_ytdlp(url, site, max_tries=2):
                     'source': 'yt-dlp',
                 }
                 
-        except Exception as e:
+        except yt_dlp.utils.DownloadError as e:
+            error_msg = str(e).lower()
             logger.error(f"yt-dlp attempt {attempt + 1} failed: {e}")
-            if attempt == max_tries - 1:
-                raise
-            time.sleep(2)
+            
+            # Specific error handling
+            if 'sign in' in error_msg or 'bot' in error_msg or 'confirm' in error_msg:
+                raise ValueError("Site requires authentication or is blocking automated requests. Try again later.")
+            elif 'impersonation' in error_msg:
+                raise ValueError("Site is blocking automated requests. Try again later or use a different video.")
+            elif 'redirect' in error_msg or '302' in error_msg:
+                raise ValueError("Redirect loop detected. The video may be private or restricted.")
+            elif 'private' in error_msg or 'unavailable' in error_msg:
+                raise ValueError("Video is private or unavailable")
+            elif attempt == max_tries - 1:
+                raise ValueError(f"Extraction failed: {str(e)[:100]}")
+            
+            time.sleep(3)
 
 def extract_video_info(url):
     """Main extraction function"""
     site = detect_site(url)
     logger.info(f"Processing {url[:60]}... (Site: {site})")
     
-    # YouTube: Use Invidious API (no cookies)
+    # YouTube: Use Invidious API first (no cookies)
     if site == 'youtube':
         video_id = extract_video_id(url)
         if video_id:
@@ -365,16 +406,16 @@ def extract_video_info(url):
     
     # Other sites: Use yt-dlp
     else:
-        return extract_with_ytdlp(url, site, max_tries=2)
+        return extract_with_ytdlp(url, site, max_tries=3)
 
 @app.route('/')
 def home():
     return jsonify({
         'service': 'Video Downloader',
-        'version': '11.0.0',
+        'version': '12.0.0',
         'status': 'running',
         'cookies_required': False,
-        'supported': ['YouTube', 'Instagram', 'TikTok', 'Facebook', 'Vimeo', 'Twitter', 'Pinterest'],
+        'supported': ['YouTube', 'Instagram', 'TikTok', 'Facebook', 'Vimeo', 'Twitter', 'Pinterest', 'Dailymotion'],
         'note': 'No cookies required! Uses Invidious API for YouTube.'
     })
 
@@ -383,7 +424,7 @@ def home():
 def health():
     return jsonify({
         'status': 'healthy',
-        'version': '11.0.0',
+        'version': '12.0.0',
         'cookies': False
     }), 200
 
@@ -562,6 +603,6 @@ def server_error(e):
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 8000))
-    logger.info(f"🚀 Starting Video Downloader v11.0.0 on port {port}")
+    logger.info(f"🚀 Starting Video Downloader v12.0.0 on port {port}")
     logger.info("✅ No cookies required - Using Invidious API for YouTube")
     app.run(host='0.0.0.0', port=port, debug=False)
