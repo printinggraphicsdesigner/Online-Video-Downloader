@@ -1,8 +1,8 @@
 """
-🎬 Video Downloader - All Qualities + Direct Download
+🎬 Video Downloader - Direct Download + All Fixes
 """
 
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, Response, stream_with_context
 from flask_cors import CORS
 import yt_dlp
 import logging
@@ -11,6 +11,7 @@ import re
 import time
 import shutil
 import random
+import requests
 from urllib.parse import urlparse
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -67,8 +68,8 @@ def get_ydl_opts(site='generic'):
         })
     elif site == 'vimeo':
         opts.update({
-            'extractor_args': {'vimeo': {}},
-            'http_headers': {'Referer': 'https://vimeo.com/'}
+            'extractor_args': {'vimeo': {'force_noplaylist': True}},
+            'http_headers': {'Referer': 'https://vimeo.com/', 'User-Agent': 'Mozilla/5.0'}
         })
     elif site == 'tiktok':
         opts.update({
@@ -94,20 +95,11 @@ def is_ffmpeg_available():
     return shutil.which('ffmpeg') is not None
 
 def format_qualities(formats, site='generic'):
-    """Extract ALL available qualities with proper labels"""
     qualities = []
     seen_labels = set()
-    
-    # Quality labels mapping
     quality_labels = {
-        2160: '2160p 4K',
-        1440: '1440p 2K', 
-        1080: '1080p Full HD',
-        720: '720p HD',
-        480: '480p',
-        360: '360p',
-        240: '240p',
-        144: '144p',
+        2160: '2160p 4K', 1440: '1440p 2K', 1080: '1080p Full HD',
+        720: '720p HD', 480: '480p', 360: '360p', 240: '240p', 144: '144p',
     }
     
     video_formats = {}
@@ -119,7 +111,6 @@ def format_qualities(formats, site='generic'):
             continue
         
         height = fmt.get('height', 0)
-        width = fmt.get('width', 0)
         vcodec = fmt.get('vcodec', 'none')
         acodec = fmt.get('acodec', 'none')
         ext = fmt.get('ext', 'mp4')
@@ -129,88 +120,52 @@ def format_qualities(formats, site='generic'):
         fmt_url = fmt.get('url')
         protocol = fmt.get('protocol', 'https')
         
-        # Skip if no video and no audio
         if vcodec == 'none' and acodec == 'none':
             continue
         
-        # Audio only formats
         if vcodec == 'none' and acodec != 'none':
             audio_label = 'Audio Only'
             if tbr > 0:
                 audio_label = f"Audio Only {int(tbr)}k"
-            
             audio_formats.append({
-                'format_id': fmt_id,
-                'label': audio_label,
-                'ext': ext,
-                'filesize': filesize,
-                'vcodec': '✗',
-                'acodec': '✓',
-                'url': fmt_url,
-                'protocol': protocol,
+                'format_id': fmt_id, 'label': audio_label, 'ext': ext,
+                'filesize': filesize, 'vcodec': '✗', 'acodec': '✓',
+                'url': fmt_url, 'protocol': protocol,
             })
             continue
         
-        # Video formats
         if height > 0:
-            # Find the best matching quality label
             label = None
             for std_height, std_label in sorted(quality_labels.items(), reverse=True):
                 if height >= std_height:
                     label = std_label
                     break
-            
             if not label:
                 label = f"{height}p"
-            
-            # Add FPS if available
             if fps and fps > 30 and fps not in [30, 60]:
                 label += f" {int(fps)}fps"
             
-            # Avoid duplicates - keep the best quality for each label
             if label not in video_formats or height > video_formats[label].get('height', 0):
                 video_formats[label] = {
-                    'format_id': fmt_id,
-                    'label': label,
-                    'ext': ext,
-                    'filesize': filesize,
-                    'vcodec': '✓',
+                    'format_id': fmt_id, 'label': label, 'ext': ext,
+                    'filesize': filesize, 'vcodec': '✓',
                     'acodec': '✓' if acodec != 'none' else '✗',
-                    'url': fmt_url,
-                    'height': height,
-                    'width': width,
-                    'fps': fps,
-                    'protocol': protocol,
+                    'url': fmt_url, 'height': height, 'fps': fps, 'protocol': protocol,
                 }
         elif tbr > 0:
-            # For formats without height (audio-only or unknown video)
             label = f"{int(tbr)}k"
             if label not in seen_labels:
                 seen_labels.add(label)
                 video_formats[label] = {
-                    'format_id': fmt_id,
-                    'label': label,
-                    'ext': ext,
-                    'filesize': filesize,
-                    'vcodec': '✓' if vcodec != 'none' else '✗',
+                    'format_id': fmt_id, 'label': label, 'ext': ext,
+                    'filesize': filesize, 'vcodec': '✓' if vcodec != 'none' else '✗',
                     'acodec': '✓' if acodec != 'none' else '✗',
-                    'url': fmt_url,
-                    'height': 0,
-                    'width': 0,
-                    'fps': None,
-                    'protocol': protocol,
+                    'url': fmt_url, 'height': 0, 'fps': None, 'protocol': protocol,
                 }
     
-    # Sort video formats by height (highest first)
-    sorted_video = sorted(
-        video_formats.values(),
-        key=lambda x: x.get('height', 0),
-        reverse=True
-    )
-    
+    sorted_video = sorted(video_formats.values(), key=lambda x: x.get('height', 0), reverse=True)
     qualities.extend(sorted_video)
     
-    # Add unique audio formats
     seen_audio = set()
     for audio in audio_formats:
         if audio['label'] not in seen_audio:
@@ -220,31 +175,22 @@ def format_qualities(formats, site='generic'):
     return qualities
 
 def extract_with_retry(url, site, max_tries=3):
-    """Try extraction multiple times"""
-    
     for attempt in range(max_tries):
         try:
             opts = get_ydl_opts(site)
-            
-            # Different strategies
             if attempt == 1 and site == 'youtube':
                 opts['extractor_args']['youtube']['player_client'] = 'web,ios,android,mweb'
             elif attempt == 2:
                 opts = {
-                    'quiet': True,
-                    'no_warnings': True,
-                    'no_check_certificate': True,
-                    'noplaylist': True,
-                    'ignoreerrors': False,
-                    'user_agent': 'Mozilla/5.0',
-                    'socket_timeout': 20,
+                    'quiet': True, 'no_warnings': True, 'no_check_certificate': True,
+                    'noplaylist': True, 'ignoreerrors': False,
+                    'user_agent': 'Mozilla/5.0', 'socket_timeout': 20,
                 }
             
             logger.info(f"Attempt {attempt + 1}/{max_tries} for {site}")
             
             with yt_dlp.YoutubeDL(opts) as ydl:
                 info = ydl.extract_info(url, download=False)
-                
                 if not info:
                     raise ValueError("No info returned")
                 
@@ -253,9 +199,7 @@ def extract_with_retry(url, site, max_tries=3):
                     formats = [info]
                 
                 logger.info(f"Found {len(formats)} formats")
-                
                 qualities = format_qualities(formats, site)
-                
                 logger.info(f"Formatted {len(qualities)} qualities")
                 
                 return {
@@ -268,8 +212,6 @@ def extract_with_retry(url, site, max_tries=3):
                     'qualities': qualities,
                     'ffmpeg_available': is_ffmpeg_available(),
                     'platform': site,
-                    'total_formats': len(formats),
-                    'total_qualities': len(qualities),
                 }
                 
         except Exception as e:
@@ -279,7 +221,7 @@ def extract_with_retry(url, site, max_tries=3):
             if attempt == max_tries - 1:
                 if 'private' in error_msg or 'unavailable' in error_msg:
                     raise ValueError("Video is private or unavailable")
-                elif 'bot' in error_msg or 'authentication' in error_msg or 'login' in error_msg or 'sign in' in error_msg:
+                elif 'bot' in error_msg or 'authentication' in error_msg or 'login' in error_msg:
                     raise ValueError("Site requires authentication. Try again later.")
                 elif 'region' in error_msg or 'blocked' in error_msg:
                     raise ValueError("Video not available in your region")
@@ -289,23 +231,24 @@ def extract_with_retry(url, site, max_tries=3):
                     raise ValueError("Video removed due to copyright")
                 elif '403' in error_msg or 'forbidden' in error_msg:
                     raise ValueError("Access forbidden by the site")
+                elif 'config_url' in error_msg:
+                    raise ValueError("Failed to extract Vimeo video. It may be private or restricted.")
                 else:
                     raise ValueError(f"Failed to extract: {str(e)[:100]}")
-            
             time.sleep(1)
 
 @app.route('/')
 def home():
     return jsonify({
         'service': 'Video Downloader',
-        'version': '7.0.0',
+        'version': '8.0.0',
         'status': 'running',
         'supported': ['Instagram', 'TikTok', 'Facebook', 'Vimeo', 'YouTube (limited)'],
     })
 
 @app.route('/health')
 def health():
-    return jsonify({'status': 'healthy', 'version': '7.0.0'}), 200
+    return jsonify({'status': 'healthy', 'version': '8.0.0'}), 200
 
 @app.route('/api/get-info', methods=['POST', 'OPTIONS'])
 def get_info():
@@ -366,7 +309,6 @@ def download():
         
         with yt_dlp.YoutubeDL(opts) as ydl:
             info = ydl.extract_info(url, download=False)
-            
             if not info:
                 raise ValueError("No info")
             
@@ -394,6 +336,50 @@ def download():
     except Exception as e:
         logger.error(f"Download error: {e}")
         return jsonify({'success': False, 'error': f'Failed: {str(e)[:100]}'}), 500
+
+# ✅ NEW: Proxy download endpoint for direct download
+@app.route('/api/proxy-download')
+def proxy_download():
+    """Stream video with Content-Disposition: attachment header"""
+    try:
+        video_url = request.args.get('url')
+        filename = request.args.get('filename', 'video.mp4')
+        
+        if not video_url:
+            return jsonify({'error': 'URL required'}), 400
+        
+        logger.info(f"Proxy download: {video_url[:80]}...")
+        
+        # Stream the video from CDN
+        response = requests.get(video_url, stream=True, headers={
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        }, timeout=30)
+        
+        if response.status_code != 200:
+            return jsonify({'error': f'Failed to fetch video: {response.status_code}'}), 500
+        
+        # Get content type
+        content_type = response.headers.get('Content-Type', 'video/mp4')
+        
+        # Stream with attachment header
+        def generate():
+            for chunk in response.iter_content(chunk_size=8192):
+                if chunk:
+                    yield chunk
+        
+        return Response(
+            stream_with_context(generate()),
+            mimetype=content_type,
+            headers={
+                'Content-Disposition': f'attachment; filename="{filename}"',
+                'Content-Type': content_type,
+                'Cache-Control': 'no-cache',
+            }
+        )
+        
+    except Exception as e:
+        logger.error(f"Proxy download error: {e}")
+        return jsonify({'error': f'Proxy failed: {str(e)[:100]}'}), 500
 
 @app.errorhandler(404)
 def not_found(e):
