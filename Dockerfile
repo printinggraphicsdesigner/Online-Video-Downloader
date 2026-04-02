@@ -1,4 +1,3 @@
-# Use official Python slim image
 FROM python:3.11-slim
 
 # Install FFmpeg and system dependencies
@@ -11,7 +10,7 @@ RUN apt-get update && apt-get install -y \
 # Set working directory
 WORKDIR /app
 
-# Copy requirements first (better caching)
+# Copy requirements first
 COPY requirements.txt .
 
 # Install Python dependencies
@@ -19,6 +18,9 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy application code
 COPY . .
+
+# Create cookies directory
+RUN mkdir -p /app/cookies && chmod 777 /app/cookies
 
 # Create temp directory
 RUN mkdir -p /app/temp && chmod 777 /app/temp
