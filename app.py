@@ -101,14 +101,20 @@ def get_ydl_opts(site='generic'):
         },
     }
 
-    # ── YouTube: force yt-dlp with best merged format ──
+    # ── YouTube: use android + ios clients (bypass player response errors) ──
     if site == 'youtube':
         base.update({
             'extractor_args': {
                 'youtube': {
-                    'player_client': ['web', 'android'],
-                    'skip': ['hls', 'dash'],  # prefer mp4 muxed
+                    # android & ios clients don't need po_token / player JS
+                    # tv_embedded also works for most videos
+                    'player_client': ['android', 'ios', 'tv_embedded'],
+                    'player_skip': ['webpage', 'configs'],
                 }
+            },
+            'http_headers': {
+                'User-Agent': 'com.google.android.youtube/19.09.37 (Linux; U; Android 11) gzip',
+                'Accept-Language': 'en-US,en;q=0.9',
             },
         })
 
