@@ -101,20 +101,19 @@ def get_ydl_opts(site='generic'):
         },
     }
 
-    # ── YouTube: use android + ios clients (bypass player response errors) ──
+    # ── YouTube: bgutil POT provider + web client ──
+    # bgutil server চলছে localhost:4416 তে (Dockerfile এ start হয়)
+    # এটা YouTube এর BotGuard bypass করে PO Token generate করে
     if site == 'youtube':
         base.update({
             'extractor_args': {
                 'youtube': {
-                    # android & ios clients don't need po_token / player JS
-                    # tv_embedded also works for most videos
-                    'player_client': ['android', 'ios', 'tv_embedded'],
-                    'player_skip': ['webpage', 'configs'],
-                }
-            },
-            'http_headers': {
-                'User-Agent': 'com.google.android.youtube/19.09.37 (Linux; U; Android 11) gzip',
-                'Accept-Language': 'en-US,en;q=0.9',
+                    'player_client': ['web'],
+                },
+                # bgutil HTTP server থেকে PO Token নেবে
+                'youtubepot-bgutilhttp': {
+                    'base_url': 'http://127.0.0.1:4416',
+                },
             },
         })
 
