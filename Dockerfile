@@ -1,39 +1,47 @@
 FROM python:3.11-slim
 
-# Install FFmpeg and system dependencies
+# ── System dependencies ──────────────────────────────────────────────────────
 RUN apt-get update && apt-get install -y \
     ffmpeg \
     curl \
     git \
+    nodejs \
+    npm \
     && rm -rf /var/lib/apt/lists/*
 
-# Set working directory
 WORKDIR /app
 
-# Copy requirements first
+# ── Python dependencies ───────────────────────────────────────────────────────
 COPY requirements.txt .
-
-# Install Python dependencies
-# --no-cache-dir ensures yt-dlp always gets latest version
 RUN pip install --no-cache-dir --upgrade pip && \
     pip install --no-cache-dir -r requirements.txt && \
-    pip install --no-cache-dir --upgrade yt-dlp
+    pip install --no-cache-dir --upgrade yt-dlp && \
+    pip install --no-cache-dir bgutil-ytdlp-pot-provider
 
-# Copy application code
+# ── bgutil POT server setup (YouTube bot bypass) ─────────────────────────────
+RUN git clone --single-branch --branch 1.3.1 \
+    https://github.com/Brainicism/bgutil-ytdlp-pot-provider.git \
+    /bgutil && \
+    cd /bgutil/server && \
+    npm ci && \
+    npx tsc
+
+# ── Application code ──────────────────────────────────────────────────────────
 COPY . .
 
-# Create cookies directory
 RUN mkdir -p /app/cookies && chmod 777 /app/cookies
+RUN mkdir -p /app/temp   && chmod 777 /app/temp
 
-# Create temp directory
-RUN mkdir -p /app/temp && chmod 777 /app/temp
-
-# Expose port
 EXPOSE 8000
 
-# Health check
-HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
+HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
   CMD curl -f http://localhost:8000/health || exit 1
 
-# Run with gunicorn
-CMD ["gunicorn", "app:app", "--bind", "0.0.0.0:8000", "--workers", "2", "--timeout", "120", "--log-level", "info"]
+# bgutil server background শুরু করো, তারপর Flask চালাও
+CMD node /bgutil/server/build/main.js --port 4416 & \
+    sleep 5 && \
+    gunicorn app:app \
+      --bind 0.0.0.0:8000 \
+      --workers 2 \
+      --timeout 120 \
+      --log-level info
