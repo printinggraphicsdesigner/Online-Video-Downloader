@@ -105,8 +105,12 @@ def format_qualities(formats, site='generic'):
         ext     = fmt.get('ext', 'mp4') or 'mp4'
         fsize   = fmt.get('filesize') or fmt.get('filesize_approx') or 0
         fps     = fmt.get('fps')
-        url     = fmt.get('url', '')
+        url     = fmt.get('url', '') or fmt.get('manifest_url', '')
         fmt_id  = fmt.get('format_id', '')
+        proto   = fmt.get('protocol', '') or ''
+
+        # HLS/DASH live stream formats — height 0 হলেও include করো
+        is_live_fmt = proto in ('m3u8', 'm3u8_native', 'http_dash_segments', 'https_dash_segments')
 
         has_video = vcodec not in ('none', '', None)
         has_audio = acodec not in ('none', '', None)
@@ -117,10 +121,25 @@ def format_qualities(formats, site='generic'):
             audio_only.append({'format_id': fmt_id, 'label': 'Audio Only', 'ext': 'm4a',
                 'filesize': fsize, 'vcodec': '✗', 'acodec': '✓', 'url': url, 'height': 0, 'needs_merge': False})
             continue
-        if height < 1:
+
+        # height 0 কিন্তু live stream — তবুও রাখো
+        if height < 1 and not is_live_fmt:
             continue
 
+        # Live stream এর জন্য height অনুমান করো resolution থেকে
+        if height < 1:
+            res = fmt.get('resolution', '') or ''
+            if '1080' in res: height = 1080
+            elif '720' in res: height = 720
+            elif '480' in res: height = 480
+            elif '360' in res: height = 360
+            elif '240' in res: height = 240
+            else: height = 360  # default
+
         label = get_label(height, fps)
+        if is_live_fmt:
+            label += ' 🔴'  # live indicator
+
         entry = {'format_id': fmt_id, 'label': label, 'ext': 'mp4',
                  'filesize': fsize, 'vcodec': '✓', 'height': height, 'fps': fps, 'url': url}
 
@@ -162,6 +181,7 @@ def get_ydl_opts(site='generic'):
         'socket_timeout': 60,
         'user_agent': ua,
         'geo_bypass': True,
+        # format নির্দিষ্ট করা নেই — সব format আনো, পরে আমরা filter করব
         'http_headers': {
             'User-Agent': ua,
             'Accept-Language': 'en-US,en;q=0.9',
@@ -196,15 +216,24 @@ def extract_with_ytdlp(url, site, max_tries=3):
                 info = ydl.extract_info(url, download=False)
                 if not info:
                     raise ValueError("No info returned")
+
                 formats = info.get('formats', [])
                 if not formats and info.get('url'):
                     formats = [info]
+
                 qualities = format_qualities(formats, site)
-                if not qualities and info.get('url'):
-                    qualities = [{'format_id': 'best', 'label': 'Best Quality',
-                        'ext': info.get('ext','mp4'), 'filesize': 0,
-                        'vcodec': '✓', 'acodec': '✓', 'url': info.get('url'),
-                        'height': info.get('height',0), 'needs_merge': False}]
+
+                # যদি qualities খালি হয় — best format দিয়ে fallback
+                if not qualities:
+                    best_url = info.get('url') or info.get('manifest_url', '')
+                    if best_url:
+                        h = info.get('height', 0) or 0
+                        label = get_label(h) if h else 'Best Quality'
+                        qualities = [{'format_id': 'best', 'label': label,
+                            'ext': info.get('ext','mp4'), 'filesize': 0,
+                            'vcodec': '✓', 'acodec': '✓', 'url': best_url,
+                            'height': h, 'needs_merge': False}]
+
                 return {
                     'success': True,
                     'title': info.get('title','Unknown'),
@@ -216,6 +245,7 @@ def extract_with_ytdlp(url, site, max_tries=3):
                     'ffmpeg_available': FFMPEG,
                     'platform': site,
                     'source': 'yt-dlp',
+                    'is_live': info.get('is_live', False),
                 }
         except yt_dlp.utils.DownloadError as e:
             last_error = str(e)
@@ -224,7 +254,10 @@ def extract_with_ytdlp(url, site, max_tries=3):
             if any(k in em for k in ['private','unavailable','not exist','removed']):
                 raise ValueError("ভিডিওটি প্রাইভেট বা সরিয়ে ফেলা হয়েছে।")
             if 'confirm you are not a bot' in em or ('sign in' in em and 'bot' in em):
-                raise ValueError("YouTube cookies দরকার। YOUTUBE_COOKIES environment variable সেট করুন।")
+                raise ValueError("YouTube cookies মেয়াদ শেষ। নতুন cookies দিন।")
+            if 'requested format is not available' in em:
+                # format problem — এটা retry করার দরকার নেই
+                raise ValueError("এই ভিডিওর format পাওয়া যাচ্ছে না। অন্য ভিডিও চেষ্টা করুন।")
             if attempt < max_tries - 1:
                 time.sleep(2 + attempt * 2)
         except Exception as e:
