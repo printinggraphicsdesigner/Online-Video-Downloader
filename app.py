@@ -261,10 +261,20 @@ def extract_with_ytdlp(url, site, max_tries=3):
 
                 is_live = info.get('is_live', False) or '/live/' in url
                 formats = info.get('formats', [])
+
+                # DEBUG LOG — কতগুলো format আসছে দেখো
+                logger.info(f"[DEBUG] formats count={len(formats)} is_live={is_live}")
+                for i, f in enumerate(formats[:8]):
+                    logger.info(f"[DEBUG] fmt[{i}] id={f.get('format_id')} "
+                               f"h={f.get('height')} vc={f.get('vcodec','?')[:8]} "
+                               f"ac={f.get('acodec','?')[:8]} ext={f.get('ext','?')} "
+                               f"proto={f.get('protocol','?')}")
+
                 if not formats and (info.get('url') or info.get('manifest_url')):
                     formats = [info]
 
                 qualities = format_qualities(formats, is_live=is_live)
+                logger.info(f"[DEBUG] qualities after filter={len(qualities)}")
 
                 # Fallback: যদি কোনো quality না পাওয়া যায়
                 if not qualities:
