@@ -76,6 +76,34 @@ def setup_cookies():
 COOKIES_OK = setup_cookies()
 logger.info(f"FFmpeg={FFMPEG} | Cookies={'OK' if COOKIES_OK else 'MISSING'}")
 
+# ── Security: API Key + Domain Protection ─────────────────────────────────────
+# Render Environment এ সেট করুন:
+#   API_SECRET_KEY = যেকোনো random string (যেমন: mysite_2026_xyz)
+#   ALLOWED_ORIGINS = আপনার domain (যেমন: easylifez.com)
+API_SECRET_KEY    = os.environ.get('API_SECRET_KEY', '')
+ALLOWED_ORIGINS_ENV = os.environ.get('ALLOWED_ORIGINS', '')
+
+ALLOWED_ORIGINS_LIST = [o.strip().lower() for o in ALLOWED_ORIGINS_ENV.split(',') if o.strip()]
+logger.info(f"API Key set: {bool(API_SECRET_KEY)} | Allowed: {ALLOWED_ORIGINS_LIST}")
+
+def is_authorized(req):
+    # কিছুই set না থাকলে সবার জন্য open (setup না হওয়া পর্যন্ত)
+    if not API_SECRET_KEY and not ALLOWED_ORIGINS_LIST:
+        return True
+    # API Key দিয়ে authorize
+    if API_SECRET_KEY:
+        key = req.headers.get('X-API-Key', '') or req.args.get('api_key', '')
+        if key == API_SECRET_KEY:
+            return True
+    # Domain দিয়ে authorize (Referer বা Origin header)
+    if ALLOWED_ORIGINS_LIST:
+        origin  = (req.headers.get('Origin', '') or '').lower()
+        referer = (req.headers.get('Referer', '') or '').lower()
+        for allowed in ALLOWED_ORIGINS_LIST:
+            if allowed in origin or allowed in referer:
+                return True
+    return False
+
 USER_AGENTS = [
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/122.0.0.0 Safari/537.36',
     'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/122.0.0.0 Safari/537.36',
@@ -312,8 +340,13 @@ def get_info():
         resp = Response('', status=204)
         resp.headers['Access-Control-Allow-Origin'] = '*'
         resp.headers['Access-Control-Allow-Methods'] = 'POST, OPTIONS'
-        resp.headers['Access-Control-Allow-Headers'] = 'Content-Type'
+        resp.headers['Access-Control-Allow-Headers'] = 'Content-Type, X-API-Key'
         return resp
+
+    # Authorization check
+    if not is_authorized(request):
+        logger.warning(f"Unauthorized request from: {request.headers.get('Origin','?')} | {request.remote_addr}")
+        return jsonify({'success': False, 'error': 'Unauthorized'}), 403
 
     data = request.get_json(silent=True) or {}
     url = data.get('url', '').strip()
