@@ -87,22 +87,8 @@ ALLOWED_ORIGINS_LIST = [o.strip().lower() for o in ALLOWED_ORIGINS_ENV.split(','
 logger.info(f"API Key set: {bool(API_SECRET_KEY)} | Allowed: {ALLOWED_ORIGINS_LIST}")
 
 def is_authorized(req):
-    # কিছুই set না থাকলে সবার জন্য open (setup না হওয়া পর্যন্ত)
-    if not API_SECRET_KEY and not ALLOWED_ORIGINS_LIST:
-        return True
-    # API Key দিয়ে authorize
-    if API_SECRET_KEY:
-        key = req.headers.get('X-API-Key', '') or req.args.get('api_key', '')
-        if key == API_SECRET_KEY:
-            return True
-    # Domain দিয়ে authorize (Referer বা Origin header)
-    if ALLOWED_ORIGINS_LIST:
-        origin  = (req.headers.get('Origin', '') or '').lower()
-        referer = (req.headers.get('Referer', '') or '').lower()
-        for allowed in ALLOWED_ORIGINS_LIST:
-            if allowed in origin or allowed in referer:
-                return True
-    return False
+    # সবসময় allow — security পরে যোগ করব
+    return True
 
 USER_AGENTS = [
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/122.0.0.0 Safari/537.36',
