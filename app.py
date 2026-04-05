@@ -30,7 +30,7 @@ app = Flask(__name__)
 CORS(app, resources={r"/*": {
     "origins": "*",
     "methods": ["GET", "POST", "OPTIONS"],
-    "allow_headers": ["Content-Type", "Authorization"],
+    "allow_headers": ["Content-Type", "Authorization", "X-API-Key", "x-api-key"],
     "expose_headers": ["Content-Disposition", "Content-Length"],
 }})
 
@@ -39,7 +39,7 @@ CORS(app, resources={r"/*": {
 def add_cors_headers(response):
     response.headers['Access-Control-Allow-Origin'] = '*'
     response.headers['Access-Control-Allow-Methods'] = 'GET, POST, OPTIONS'
-    response.headers['Access-Control-Allow-Headers'] = 'Content-Type, Authorization'
+    response.headers['Access-Control-Allow-Headers'] = 'Content-Type, Authorization, X-API-Key, x-api-key'
     return response
 
 limiter = Limiter(app=app, key_func=get_remote_address,
