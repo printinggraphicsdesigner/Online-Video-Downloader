@@ -1,7 +1,7 @@
 FROM python:3.11-slim
 
 RUN apt-get update && apt-get install -y \
-    ffmpeg curl git \
+    ffmpeg curl \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -13,8 +13,7 @@ RUN pip install --no-cache-dir --upgrade pip && \
 
 COPY . .
 
-RUN mkdir -p /app/cookies && chmod 777 /app/cookies
-RUN mkdir -p /app/temp   && chmod 777 /app/temp
+RUN mkdir -p /app/temp && chmod 777 /app/temp
 
 EXPOSE 8000
 
