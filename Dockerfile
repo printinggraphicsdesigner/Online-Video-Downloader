@@ -23,9 +23,6 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir --upgrade pip && \
     pip install --no-cache-dir -r requirements.txt
 
-# Install curl-cffi for Dailymotion
-RUN pip install --no-cache-dir curl-cffi
-
 COPY . .
 
 RUN mkdir -p /app/temp && chmod 777 /app/temp
