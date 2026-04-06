@@ -3,7 +3,7 @@
 Supports: Instagram, TikTok, Twitter, Pinterest, Vimeo, Facebook
 """
 
-from flask import Flask, request, jsonify, Response, send_file, stream_with_context
+from flask import Flask, request, jsonify, Response, stream_with_context
 from flask_cors import CORS
 import yt_dlp
 import logging
@@ -14,7 +14,6 @@ import shutil
 import subprocess
 import requests
 from urllib.parse import urlparse
-from pathlib import Path
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -48,6 +47,16 @@ def detect_site(url):
 def is_ffmpeg_available():
     """Check if FFmpeg is installed"""
     return shutil.which('ffmpeg') is not None
+
+def cleanup_temp_files(*file_paths):
+    """✅ FIX: Clean up temporary files"""
+    for path in file_paths:
+        try:
+            if path and os.path.exists(path):
+                os.remove(path)
+                logger.info(f"Cleaned up: {path}")
+        except Exception as e:
+            logger.warning(f"Failed to cleanup {path}: {e}")
 
 def get_ydl_opts(site='generic', download_mode=False):
     """Get yt-dlp options for the site"""
@@ -104,7 +113,7 @@ def get_ydl_opts(site='generic', download_mode=False):
     return opts
 
 def format_qualities(formats, ffmpeg_available=False):
-    """Format ALL available qualities (including separate video/audio for merging)"""
+    """Format ALL available qualities"""
     qualities = []
     seen_labels = set()
     
@@ -141,11 +150,11 @@ def format_qualities(formats, ffmpeg_available=False):
         if vcodec == 'none' and acodec == 'none':
             continue
         
-        # Audio only - collect separately
+        # Audio only
         if vcodec == 'none' and acodec != 'none':
             audio_label = 'Audio Only'
             tbr = fmt.get('tbr', 0)
-            if tbr > 0:
+            if tbr and tbr > 0:
                 audio_label = f"Audio Only {int(tbr)}k"
             
             audio_formats.append({
@@ -159,7 +168,7 @@ def format_qualities(formats, ffmpeg_available=False):
             })
             continue
         
-        # Video formats - include ALL (even if needs merging)
+        # Video formats
         if height > 0 and vcodec != 'none':
             label = None
             for std_height, std_label in sorted(quality_map.items(), reverse=True):
@@ -173,7 +182,6 @@ def format_qualities(formats, ffmpeg_available=False):
             if fps and fps > 30 and fps not in [30, 60]:
                 label += f" {int(fps)}fps"
             
-            # Check if format needs merging (separate audio)
             needs_merge = acodec == 'none'
             
             if label not in video_formats or height > video_formats[label].get('height', 0):
@@ -191,7 +199,6 @@ def format_qualities(formats, ffmpeg_available=False):
                     'note': 'Requires FFmpeg merge' if needs_merge and ffmpeg_available else None,
                 }
     
-    # Sort video formats by height
     sorted_labels = sorted(
         video_formats.keys(),
         key=lambda x: int(''.join(filter(str.isdigit, x)) or '0'),
@@ -201,11 +208,42 @@ def format_qualities(formats, ffmpeg_available=False):
     for label in sorted_labels:
         qualities.append(video_formats[label])
     
-    # Add audio-only at the end
     if audio_formats:
         qualities.append(audio_formats[0])
     
     return qualities
+
+def merge_video_audio(video_path, audio_path, output_path):
+    """Merge video and audio using FFmpeg"""
+    cmd = [
+        'ffmpeg',
+        '-i', video_path,
+        '-i', audio_path,
+        '-c:v', 'copy',
+        '-c:a', 'aac',
+        '-b:a', '192k',
+        '-movflags', '+faststart',
+        '-y',
+        output_path
+    ]
+    
+    logger.info(f"FFmpeg command: {' '.join(cmd)}")
+    
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+    
+    if result.returncode != 0:
+        logger.error(f"FFmpeg stderr: {result.stderr}")
+        raise RuntimeError(f"FFmpeg failed: {result.stderr[:200]}")
+    
+    if not os.path.exists(output_path):
+        raise RuntimeError("Output file not created")
+    
+    file_size = os.path.getsize(output_path)
+    if file_size < 1024:
+        raise RuntimeError(f"Output file too small: {file_size} bytes")
+    
+    logger.info(f"✓ Merge successful: {output_path} ({file_size / 1024 / 1024:.2f} MB)")
+    return output_path
 
 def extract_video_info(url, site, max_attempts=3):
     """Extract video info with retries"""
@@ -231,7 +269,7 @@ def extract_video_info(url, site, max_attempts=3):
                 logger.info(f"Found {len(formats)} formats")
                 
                 qualities = format_qualities(formats, ffmpeg_available)
-                logger.info(f"Formatted {len(qualities)} qualities (FFmpeg: {ffmpeg_available})")
+                logger.info(f"Formatted {len(qualities)} qualities")
                 
                 return {
                     'success': True,
@@ -265,57 +303,11 @@ def extract_video_info(url, site, max_attempts=3):
             
             time.sleep(2 ** attempt)
 
-def merge_video_audio(video_path, audio_path, output_path):
-    """Merge video and audio using FFmpeg with better error handling"""
-    cmd = [
-        'ffmpeg',
-        '-i', video_path,
-        '-i', audio_path,
-        '-c:v', 'copy',           # Copy video without re-encoding
-        '-c:a', 'aac',            # Encode audio to AAC
-        '-b:a', '192k',           # Audio bitrate
-        '-movflags', '+faststart', # Optimize for web streaming
-        '-y',                      # Overwrite output
-        output_path
-    ]
-    
-    logger.info(f"FFmpeg command: {' '.join(cmd)}")
-    
-    try:
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=300  # 5 minutes
-        )
-        
-        if result.returncode != 0:
-            logger.error(f"FFmpeg stderr: {result.stderr}")
-            raise RuntimeError(f"FFmpeg failed: {result.stderr[:200]}")
-        
-        # Verify output file
-        if not os.path.exists(output_path):
-            raise RuntimeError("Output file not created")
-        
-        file_size = os.path.getsize(output_path)
-        if file_size < 1024:  # Less than 1KB
-            raise RuntimeError(f"Output file too small: {file_size} bytes")
-        
-        logger.info(f"✓ Merge successful: {output_path} ({file_size / 1024 / 1024:.2f} MB)")
-        return output_path
-        
-    except subprocess.TimeoutExpired:
-        logger.error("FFmpeg merge timed out")
-        raise RuntimeError("Merge timed out - video may be too large")
-    except Exception as e:
-        logger.error(f"Merge error: {e}")
-        raise
-
 @app.route('/')
 def home():
     return jsonify({
         'service': 'Video Downloader',
-        'version': '18.0.0',
+        'version': '19.0.0',
         'status': 'running',
         'ffmpeg': is_ffmpeg_available(),
         'supported_sites': ['Instagram', 'TikTok', 'Twitter', 'Pinterest', 'Vimeo', 'Facebook'],
@@ -327,7 +319,7 @@ def health():
     return jsonify({
         'status': 'healthy',
         'ffmpeg': is_ffmpeg_available(),
-        'version': '18.0.0'
+        'version': '19.0.0'
     }), 200
 
 @app.route('/api/get-info', methods=['POST', 'OPTIONS'])
@@ -348,7 +340,6 @@ def get_info():
         if not parsed.scheme or not parsed.netloc:
             return jsonify({'success': False, 'error': 'Invalid URL'}), 400
         
-        # Security check
         blocked = ['localhost', '127.0.0.1', '192.168.', '10.', '172.16.']
         if any(b in url.lower() for b in blocked):
             return jsonify({'success': False, 'error': 'URL not allowed'}), 403
@@ -396,7 +387,6 @@ def download():
         ffmpeg_available = is_ffmpeg_available()
         logger.info(f"Site: {site}, FFmpeg available: {ffmpeg_available}")
         
-        # Get video info first
         opts = get_ydl_opts(site)
         
         with yt_dlp.YoutubeDL(opts) as ydl:
@@ -425,9 +415,14 @@ def download():
             
             # === CASE 1: Needs merge AND FFmpeg available ===
             if needs_merge and ffmpeg_available:
-                # Find matching audio format
+                # ✅ FIX: Handle None values in tbr when sorting
+                def safe_tbr(fmt):
+                    tbr = fmt.get('tbr')
+                    return tbr if tbr is not None else 0
+                
+                # Find matching audio format (best quality audio)
                 audio_format = None
-                for fmt in sorted(info.get('formats', []), key=lambda x: x.get('tbr', 0), reverse=True):
+                for fmt in sorted(info.get('formats', []), key=safe_tbr, reverse=True):
                     if fmt.get('vcodec') == 'none' and fmt.get('acodec') != 'none':
                         audio_format = fmt
                         logger.info(f"Found audio format: {fmt.get('format_id')} - {fmt.get('tbr')}k")
@@ -555,6 +550,7 @@ def download():
         logger.error(f"Download error: {e}", exc_info=True)
         cleanup_temp_files(*temp_files)
         return jsonify({'success': False, 'error': f'Failed: {str(e)[:150]}'}), 500
+
 @app.route('/api/stream-file')
 def stream_file():
     """Stream a merged file from temp folder"""
@@ -565,7 +561,6 @@ def stream_file():
         if not file_path or not os.path.exists(file_path):
             return jsonify({'error': 'File not found'}), 404
         
-        # Stream the file
         def generate():
             with open(file_path, 'rb') as f:
                 while chunk := f.read(8192):
@@ -582,7 +577,6 @@ def stream_file():
             }
         )
         
-        # Clean up after streaming starts (file will be deleted after response)
         @response.call_on_close
         def cleanup():
             cleanup_temp_files(file_path)
@@ -674,7 +668,7 @@ def server_error(e):
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 8000))
-    logger.info(f"🚀 Starting Video Downloader v18.0.0 on port {port}")
+    logger.info(f"🚀 Starting Video Downloader v19.0.0 on port {port}")
     logger.info(f"✅ FFmpeg available: {is_ffmpeg_available()}")
     logger.info(f"✅ Temp folder: {app.config['TEMP_FOLDER']}")
     app.run(host='0.0.0.0', port=port, debug=False)
