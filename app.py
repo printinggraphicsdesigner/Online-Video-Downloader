@@ -266,44 +266,50 @@ def extract_video_info(url, site, max_attempts=3):
             time.sleep(2 ** attempt)
 
 def merge_video_audio(video_path, audio_path, output_path):
-    """Merge video and audio using FFmpeg"""
+    """Merge video and audio using FFmpeg with better error handling"""
     cmd = [
         'ffmpeg',
         '-i', video_path,
         '-i', audio_path,
-        '-c:v', 'copy',
-        '-c:a', 'aac',
-        '-strict', 'experimental',
-        '-movflags', '+faststart',
-        '-y',  # Overwrite output
+        '-c:v', 'copy',           # Copy video without re-encoding
+        '-c:a', 'aac',            # Encode audio to AAC
+        '-b:a', '192k',           # Audio bitrate
+        '-movflags', '+faststart', # Optimize for web streaming
+        '-y',                      # Overwrite output
         output_path
     ]
     
-    logger.info(f"Merging: {' '.join(cmd)}")
+    logger.info(f"FFmpeg command: {' '.join(cmd)}")
     
-    result = subprocess.run(
-        cmd,
-        capture_output=True,
-        text=True,
-        timeout=300  # 5 minutes timeout
-    )
-    
-    if result.returncode != 0:
-        logger.error(f"FFmpeg merge failed: {result.stderr}")
-        raise RuntimeError(f"FFmpeg merge failed: {result.stderr[:200]}")
-    
-    logger.info(f"✓ Merge successful: {output_path}")
-    return output_path
-
-def cleanup_temp_files(*file_paths):
-    """Clean up temporary files"""
-    for path in file_paths:
-        try:
-            if path and os.path.exists(path):
-                os.remove(path)
-                logger.info(f"Cleaned up: {path}")
-        except Exception as e:
-            logger.warning(f"Failed to cleanup {path}: {e}")
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=300  # 5 minutes
+        )
+        
+        if result.returncode != 0:
+            logger.error(f"FFmpeg stderr: {result.stderr}")
+            raise RuntimeError(f"FFmpeg failed: {result.stderr[:200]}")
+        
+        # Verify output file
+        if not os.path.exists(output_path):
+            raise RuntimeError("Output file not created")
+        
+        file_size = os.path.getsize(output_path)
+        if file_size < 1024:  # Less than 1KB
+            raise RuntimeError(f"Output file too small: {file_size} bytes")
+        
+        logger.info(f"✓ Merge successful: {output_path} ({file_size / 1024 / 1024:.2f} MB)")
+        return output_path
+        
+    except subprocess.TimeoutExpired:
+        logger.error("FFmpeg merge timed out")
+        raise RuntimeError("Merge timed out - video may be too large")
+    except Exception as e:
+        logger.error(f"Merge error: {e}")
+        raise
 
 @app.route('/')
 def home():
@@ -401,85 +407,102 @@ def download():
                     break
             
             if not target_format:
-                # Fallback to best
                 target_format = info
             
-            # Check if merging is needed
             vcodec = target_format.get('vcodec', 'none')
             acodec = target_format.get('acodec', 'none')
             needs_merge = (vcodec != 'none' and acodec == 'none')
             
-            logger.info(f"Download: format_id={format_id}, needs_merge={needs_merge}, ffmpeg={ffmpeg_available}")
+            logger.info(f"Download: format={format_id}, vcodec={vcodec}, acodec={acodec}, needs_merge={needs_merge}, ffmpeg={ffmpeg_available}")
             
-            # If needs merge and FFmpeg available, do server-side merge
+            # === CASE 1: Needs merge AND FFmpeg available ===
             if needs_merge and ffmpeg_available:
-                # Find matching audio format
+                # Find matching audio format (best quality audio)
                 audio_format = None
-                for fmt in info.get('formats', []):
-                    if fmt.get('vcodec') == 'none' and fmt.get('acodec') != 'none':
+                for fmt in sorted(info.get('formats', []), key=lambda x: x.get('tbr', 0), reverse=True):
+                    if fmt.get('vcodec') == 'none' and fmt.get('acodec') != 'none' and fmt.get('ext') in ['m4a', 'mp4', 'webm']:
                         audio_format = fmt
                         break
+                
+                if not audio_format:
+                    logger.warning("No suitable audio format found, trying fallback...")
+                    # Fallback: try any audio format
+                    for fmt in info.get('formats', []):
+                        if fmt.get('vcodec') == 'none' and fmt.get('acodec') != 'none':
+                            audio_format = fmt
+                            break
                 
                 if not audio_format:
                     raise ValueError("No matching audio format found for merging")
                 
                 # Generate unique temp file names
                 timestamp = int(time.time())
-                video_temp = os.path.join(app.config['TEMP_FOLDER'], f'video_{timestamp}_{target_format["format_id"]}.mp4')
-                audio_temp = os.path.join(app.config['TEMP_FOLDER'], f'audio_{timestamp}_{audio_format["format_id"]}.m4a')
-                output_temp = os.path.join(app.config['TEMP_FOLDER'], f'merged_{timestamp}.mp4')
+                video_temp = os.path.join(app.config['TEMP_FOLDER'], f'v_{timestamp}_{target_format["format_id"]}.mp4')
+                audio_temp = os.path.join(app.config['TEMP_FOLDER'], f'a_{timestamp}_{audio_format["format_id"]}.m4a')
+                output_temp = os.path.join(app.config['TEMP_FOLDER'], f'm_{timestamp}.mp4')
                 
                 temp_files = [video_temp, audio_temp, output_temp]
                 
-                # Download video stream
-                logger.info(f"Downloading video stream: {target_format.get('url')[:80]}...")
-                video_opts = opts.copy()
-                video_opts['format'] = target_format['format_id']
-                video_opts['outtmpl'] = video_temp
-                
-                with yt_dlp.YoutubeDL(video_opts) as video_ydl:
-                    video_ydl.download([url])
-                
-                if not os.path.exists(video_temp):
-                    raise ValueError("Failed to download video stream")
-                
-                # Download audio stream
-                logger.info(f"Downloading audio stream: {audio_format.get('url')[:80]}...")
-                audio_opts = opts.copy()
-                audio_opts['format'] = audio_format['format_id']
-                audio_opts['outtmpl'] = audio_temp
-                
-                with yt_dlp.YoutubeDL(audio_opts) as audio_ydl:
-                    audio_ydl.download([url])
-                
-                if not os.path.exists(audio_temp):
-                    raise ValueError("Failed to download audio stream")
-                
-                # Merge using FFmpeg
-                logger.info("Merging video and audio with FFmpeg...")
-                merge_video_audio(video_temp, audio_temp, output_temp)
-                
-                if not os.path.exists(output_temp):
-                    raise ValueError("FFmpeg merge failed - output file not created")
-                
-                # Return direct URL to the merged file (proxy endpoint will stream it)
-                title = re.sub(r'[^\w\s\.\-]', '', info.get('title', 'video'))
-                title = re.sub(r'\s+', '_', title.strip())[:100]
-                
-                # Clean up video and audio temp files (keep merged for streaming)
-                cleanup_temp_files(video_temp, audio_temp)
-                
-                return jsonify({
-                    'success': True,
-                    'method': 'merged',
-                    'download_url': f'/api/stream-file?path={output_temp}&filename={title}.mp4',
-                    'title': info.get('title'),
-                    'filename': f"{title}.mp4",
-                    'merged': True,
-                })
+                try:
+                    # Download video stream
+                    logger.info(f"Downloading video: {target_format.get('format_id')}")
+                    video_opts = opts.copy()
+                    video_opts['format'] = target_format['format_id']
+                    video_opts['outtmpl'] = video_temp
+                    video_opts['noplaylist'] = True
+                    
+                    with yt_dlp.YoutubeDL(video_opts) as video_ydl:
+                        video_ydl.download([url])
+                    
+                    if not os.path.exists(video_temp) or os.path.getsize(video_temp) < 1024:
+                        raise ValueError("Failed to download video stream")
+                    
+                    # Download audio stream
+                    logger.info(f"Downloading audio: {audio_format.get('format_id')}")
+                    audio_opts = opts.copy()
+                    audio_opts['format'] = audio_format['format_id']
+                    audio_opts['outtmpl'] = audio_temp
+                    audio_opts['noplaylist'] = True
+                    
+                    with yt_dlp.YoutubeDL(audio_opts) as audio_ydl:
+                        audio_ydl.download([url])
+                    
+                    if not os.path.exists(audio_temp) or os.path.getsize(audio_temp) < 1024:
+                        raise ValueError("Failed to download audio stream")
+                    
+                    # Merge using FFmpeg
+                    logger.info("Merging with FFmpeg...")
+                    merge_video_audio(video_temp, audio_temp, output_temp)
+                    
+                    if not os.path.exists(output_temp) or os.path.getsize(output_temp) < 1024:
+                        raise ValueError("FFmpeg merge failed - output file invalid")
+                    
+                    # Clean up source files
+                    cleanup_temp_files(video_temp, audio_temp)
+                    
+                    title = re.sub(r'[^\w\s\.\-]', '', info.get('title', 'video'))
+                    title = re.sub(r'\s+', '_', title.strip())[:100]
+                    
+                    # Return streaming URL
+                    stream_url = f'/api/stream-file?path={output_temp}&filename={title}.mp4'
+                    
+                    return jsonify({
+                        'success': True,
+                        'method': 'merged',
+                        'download_url': stream_url,
+                        'title': info.get('title'),
+                        'filename': f"{title}.mp4",
+                        'merged': True,
+                        'ffmpeg_used': True,
+                    })
+                    
+                except Exception as merge_error:
+                    logger.error(f"Merge process failed: {merge_error}")
+                    cleanup_temp_files(*temp_files)
+                    raise ValueError(f"Merging failed: {str(merge_error)[:100]}")
             
+            # === CASE 2: Direct download (no merge needed) ===
             else:
-                # Direct download (no merge needed)
                 download_url = target_format.get('url') or info.get('url')
                 
                 if not download_url:
@@ -500,10 +523,8 @@ def download():
                 
     except Exception as e:
         logger.error(f"Download error: {e}")
-        # Clean up any temp files on error
         cleanup_temp_files(*temp_files)
         return jsonify({'success': False, 'error': f'Failed: {str(e)[:100]}'}), 500
-
 @app.route('/api/stream-file')
 def stream_file():
     """Stream a merged file from temp folder"""
