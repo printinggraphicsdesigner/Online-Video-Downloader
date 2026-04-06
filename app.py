@@ -1,86 +1,50 @@
 """
-Video Downloader v1.0
-YouTube বাদে সব সাইট সাপোর্ট করে।
-Instagram, TikTok, Facebook, Twitter, Vimeo, Dailymotion ইত্যাদি।
+🎬 Professional Video Downloader - 1080p+ with FFmpeg
+Supports: Instagram, TikTok, Twitter, Pinterest, Vimeo, Facebook
 """
 
 from flask import Flask, request, jsonify, Response, stream_with_context
 from flask_cors import CORS
-from flask_limiter import Limiter
-from flask_limiter.util import get_remote_address
 import yt_dlp
 import logging
 import os
 import re
+import time
+import shutil
 import requests
-import random
 from urllib.parse import urlparse
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
-
-CORS(app, resources={r"/api/*": {
-    "origins": "*",
-    "methods": ["GET", "POST", "OPTIONS"],
-    "allow_headers": ["Content-Type"],
-}})
-
-@app.after_request
-def add_cors(response):
-    response.headers['Access-Control-Allow-Origin'] = '*'
-    response.headers['Access-Control-Allow-Methods'] = 'GET, POST, OPTIONS'
-    response.headers['Access-Control-Allow-Headers'] = 'Content-Type'
-    return response
-
-limiter = Limiter(app=app, key_func=get_remote_address,
-                  default_limits=["200 per day", "50 per hour"])
-
+CORS(app, resources={r"/api/*": {"origins": "*", "methods": ["GET", "POST", "OPTIONS"]}})
 app.config['MAX_CONTENT_LENGTH'] = 512 * 1024 * 1024
 
-USER_AGENTS = [
-    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
-    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
-    'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
-]
-
-QUALITY_LABELS = {
-    2160: '2160p 4K',
-    1440: '1440p 2K',
-    1080: '1080p Full HD',
-    720: '720p HD',
-    480: '480p',
-    360: '360p',
-    240: '240p',
-    144: '144p',
-}
-
-
 def detect_site(url):
-    u = url.lower()
-    if 'youtube.com' in u or 'youtu.be' in u:
-        return 'youtube'
-    if 'instagram.com' in u or 'instagr.am' in u:
+    """Detect which site the URL is from"""
+    url_lower = url.lower()
+    if 'instagram.com' in url_lower or 'instagr.am' in url_lower:
         return 'instagram'
-    if 'tiktok.com' in u:
+    elif 'tiktok.com' in url_lower:
         return 'tiktok'
-    if 'facebook.com' in u or 'fb.watch' in u or 'fb.com' in u:
-        return 'facebook'
-    if 'twitter.com' in u or 'x.com' in u:
+    elif 'twitter.com' in url_lower or 'x.com' in url_lower:
         return 'twitter'
-    if 'vimeo.com' in u:
-        return 'vimeo'
-    if 'dailymotion.com' in u:
-        return 'dailymotion'
-    if 'pinterest.com' in u or 'pin.it' in u:
+    elif 'pinterest.com' in url_lower or 'pin.it' in url_lower:
         return 'pinterest'
-    return 'generic'
+    elif 'vimeo.com' in url_lower:
+        return 'vimeo'
+    elif 'facebook.com' in url_lower or 'fb.watch' in url_lower:
+        return 'facebook'
+    else:
+        return 'generic'
 
+def is_ffmpeg_available():
+    """Check if FFmpeg is installed"""
+    return shutil.which('ffmpeg') is not None
 
-def get_ydl_opts(site):
-    ua = random.choice(USER_AGENTS)
-
+def get_ydl_opts(site='generic'):
+    """Get yt-dlp options for the site"""
     opts = {
         'quiet': True,
         'no_warnings': True,
@@ -88,320 +52,407 @@ def get_ydl_opts(site):
         'noplaylist': True,
         'ignoreerrors': False,
         'retries': 3,
-        'socket_timeout': 30,
-        'user_agent': ua,
+        'fragment_retries': 3,
+        'socket_timeout': 60,
+        'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36',
+        'geo_bypass': True,
+        'extract_flat': False,
         'http_headers': {
-            'User-Agent': ua,
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
             'Accept-Language': 'en-US,en;q=0.9',
-        },
+            'Sec-Fetch-Mode': 'navigate',
+        }
     }
-
+    
     if site == 'instagram':
-        opts['http_headers'].update({
-            'X-IG-App-ID': '936619743392459',
-            'Referer': 'https://www.instagram.com/',
+        opts.update({
+            'extractor_args': {'instagram': {'include_formats': True}},
+            'http_headers': {'X-IG-App-ID': '936619743392459'}
         })
     elif site == 'tiktok':
-        opts['http_headers']['Referer'] = 'https://www.tiktok.com/'
-    elif site == 'facebook':
-        opts['http_headers']['Referer'] = 'https://www.facebook.com/'
+        opts.update({
+            'extractor_args': {'tiktok': {'embed_source': 'embed'}},
+            'http_headers': {'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 14_0 like Mac OS X)'}
+        })
     elif site == 'twitter':
-        opts['http_headers']['Referer'] = 'https://twitter.com/'
-    elif site == 'vimeo':
-        opts['http_headers']['Referer'] = 'https://vimeo.com/'
-    elif site == 'dailymotion':
-        opts['http_headers']['Referer'] = 'https://www.dailymotion.com/'
+        opts.update({
+            'extractor_args': {'twitter': {}},
+            'http_headers': {'Referer': 'https://twitter.com/'}
+        })
     elif site == 'pinterest':
-        opts['http_headers']['Referer'] = 'https://www.pinterest.com/'
-
+        opts.update({
+            'extractor_args': {'pinterest': {}},
+            'http_headers': {'Referer': 'https://www.pinterest.com/'}
+        })
+    elif site == 'vimeo':
+        opts.update({
+            'extractor_args': {'vimeo': {'force_noplaylist': True}},
+            'http_headers': {'Referer': 'https://vimeo.com/'}
+        })
+    elif site == 'facebook':
+        opts.update({
+            'extractor_args': {'facebook': {}},
+            'http_headers': {'Referer': 'https://www.facebook.com/'}
+        })
+    
     return opts
 
-
-def get_quality_label(height, fps=None):
-    label = f"{height}p"
-    for std_h in sorted(QUALITY_LABELS.keys(), reverse=True):
-        if height >= std_h:
-            label = QUALITY_LABELS[std_h]
-            break
-    if fps and int(fps) > 30:
-        label += f" {int(fps)}fps"
-    return label
-
-
-def build_qualities(formats):
-    muxed = {}    # video + audio একসাথে
-    video_only = {}
-    audio_only = []
-
+def format_qualities(formats, ffmpeg_available=False):
+    """Format all available qualities"""
+    qualities = []
+    seen_labels = set()
+    
+    quality_map = {
+        2160: '2160p 4K',
+        1440: '1440p 2K',
+        1080: '1080p Full HD',
+        720: '720p HD',
+        480: '480p',
+        360: '360p',
+        240: '240p',
+        144: '144p',
+    }
+    
+    video_formats = {}
+    audio_formats = []
+    
     for fmt in formats:
-        fmt_id  = fmt.get('format_id', '')
-        height  = fmt.get('height') or 0
-        vcodec  = fmt.get('vcodec') or 'none'
-        acodec  = fmt.get('acodec') or 'none'
-        fsize   = fmt.get('filesize') or fmt.get('filesize_approx') or 0
-        fps     = fmt.get('fps')
-        url     = fmt.get('url', '')
-        ext     = fmt.get('ext', 'mp4')
-
-        has_v = vcodec != 'none'
-        has_a = acodec != 'none'
-
-        if not has_v and not has_a:
+        fmt_id = fmt.get('format_id')
+        if not fmt_id:
             continue
-
+        
+        height = fmt.get('height', 0)
+        vcodec = fmt.get('vcodec', 'none')
+        acodec = fmt.get('acodec', 'none')
+        ext = fmt.get('ext', 'mp4')
+        filesize = fmt.get('filesize') or fmt.get('filesize_approx', 0)
+        fps = fmt.get('fps')
+        url = fmt.get('url')
+        
+        if not url:
+            continue
+        
+        if vcodec == 'none' and acodec == 'none':
+            continue
+        
         # Audio only
-        if not has_v and has_a:
-            audio_only.append({
-                'format_id': fmt_id, 'label': 'Audio Only',
-                'ext': ext, 'filesize': fsize,
-                'vcodec': '✗', 'acodec': '✓',
-                'url': url, 'height': 0,
+        if vcodec == 'none' and acodec != 'none':
+            audio_label = 'Audio Only'
+            tbr = fmt.get('tbr', 0)
+            if tbr > 0:
+                audio_label = f"Audio Only {int(tbr)}k"
+            
+            audio_formats.append({
+                'format_id': fmt_id,
+                'label': audio_label,
+                'ext': ext,
+                'filesize': filesize,
+                'vcodec': '✗',
+                'acodec': '✓',
+                'url': url,
             })
             continue
-
-        if height < 1:
-            continue
-
-        label = get_quality_label(height, fps)
-
-        # Muxed (video + audio)
-        if has_v and has_a:
-            entry = {
-                'format_id': fmt_id, 'label': label, 'ext': 'mp4',
-                'filesize': fsize, 'vcodec': '✓', 'acodec': '✓',
-                'url': url, 'height': height,
-            }
-            if label not in muxed or height > muxed[label]['height']:
-                muxed[label] = entry
-
-        # Video only
-        elif has_v:
-            entry = {
-                'format_id': fmt_id, 'label': label + ' (no audio)', 'ext': 'mp4',
-                'filesize': fsize, 'vcodec': '✓', 'acodec': '✗',
-                'url': url, 'height': height,
-            }
-            if label not in video_only or height > video_only[label]['height']:
-                video_only[label] = entry
-
-    # Sort by height descending
-    def sort_key(x):
-        m = re.search(r'\d+', x)
-        return int(m.group()) if m else 0
-
-    qualities = []
-    for label in sorted(muxed.keys(), key=sort_key, reverse=True):
-        qualities.append(muxed[label])
-
-    # Video only গুলো শুধু তখনই add করব যদি muxed এ সেই quality না থাকে
-    for label in sorted(video_only.keys(), key=sort_key, reverse=True):
-        base_label = label.replace(' (no audio)', '')
-        if base_label not in muxed:
-            qualities.append(video_only[label])
-
-    # Audio only সবার শেষে
-    if audio_only:
-        qualities.append(audio_only[0])
-
+        
+        # Video formats
+        if height > 0:
+            label = None
+            for std_height, std_label in sorted(quality_map.items(), reverse=True):
+                if height >= std_height:
+                    label = std_label
+                    break
+            
+            if not label:
+                label = f"{height}p"
+            
+            if fps and fps > 30 and fps not in [30, 60]:
+                label += f" {int(fps)}fps"
+            
+            # Check if format needs merging (separate audio/video)
+            needs_merge = acodec == 'none'
+            
+            # If FFmpeg not available, skip formats that need merging
+            if not ffmpeg_available and needs_merge:
+                continue
+            
+            if label not in video_formats or height > video_formats[label].get('height', 0):
+                video_formats[label] = {
+                    'format_id': fmt_id,
+                    'label': label,
+                    'ext': ext,
+                    'filesize': filesize,
+                    'vcodec': '✓',
+                    'acodec': '✓' if not needs_merge else '✗',
+                    'url': url,
+                    'height': height,
+                    'fps': fps,
+                    'needs_merge': needs_merge,
+                }
+    
+    # Sort video formats by height
+    sorted_labels = sorted(
+        video_formats.keys(),
+        key=lambda x: int(''.join(filter(str.isdigit, x)) or '0'),
+        reverse=True
+    )
+    
+    for label in sorted_labels:
+        qualities.append(video_formats[label])
+    
+    # Add audio format
+    if audio_formats:
+        qualities.append(audio_formats[0])
+    
     return qualities
 
-
-def extract_info(url, site):
-    opts = get_ydl_opts(site)
-    with yt_dlp.YoutubeDL(opts) as ydl:
-        info = ydl.extract_info(url, download=False)
-        if not info:
-            raise ValueError("ভিডিও তথ্য পাওয়া যায়নি")
-
-        formats = info.get('formats', [])
-        if not formats and info.get('url'):
-            formats = [info]
-
-        qualities = build_qualities(formats)
-
-        # Fallback
-        if not qualities and info.get('url'):
-            h = info.get('height', 0) or 0
-            qualities = [{
-                'format_id': 'best',
-                'label': get_quality_label(h) if h else 'Best Quality',
-                'ext': info.get('ext', 'mp4'),
-                'filesize': 0,
-                'vcodec': '✓', 'acodec': '✓',
-                'url': info['url'],
-                'height': h,
-            }]
-
-        return {
-            'success': True,
-            'title': info.get('title', 'Unknown'),
-            'thumbnail': info.get('thumbnail', ''),
-            'duration': info.get('duration', 0),
-            'uploader': info.get('uploader') or info.get('channel', ''),
-            'view_count': info.get('view_count'),
-            'qualities': qualities,
-            'platform': site,
-        }
-
-
-# ─── Routes ───────────────────────────────────────────────────────────────────
+def extract_video_info(url, site, max_attempts=3):
+    """Extract video info with retries"""
+    ffmpeg_available = is_ffmpeg_available()
+    logger.info(f"FFmpeg available: {ffmpeg_available}")
+    
+    for attempt in range(max_attempts):
+        try:
+            logger.info(f"Attempt {attempt + 1}/{max_attempts} for {site}")
+            
+            opts = get_ydl_opts(site)
+            
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                info = ydl.extract_info(url, download=False)
+                
+                if not info:
+                    raise ValueError("No information returned")
+                
+                formats = info.get('formats', [])
+                if not formats and info.get('url'):
+                    formats = [info]
+                
+                logger.info(f"Found {len(formats)} formats")
+                
+                qualities = format_qualities(formats, ffmpeg_available)
+                logger.info(f"Formatted {len(qualities)} qualities (FFmpeg: {ffmpeg_available})")
+                
+                return {
+                    'success': True,
+                    'title': info.get('title', 'Unknown'),
+                    'thumbnail': info.get('thumbnail', ''),
+                    'duration': info.get('duration', 0),
+                    'uploader': info.get('uploader') or info.get('channel') or 'Unknown',
+                    'view_count': info.get('view_count'),
+                    'qualities': qualities,
+                    'ffmpeg_available': ffmpeg_available,
+                    'platform': site,
+                }
+                
+        except Exception as e:
+            error_msg = str(e).lower()
+            logger.error(f"Attempt {attempt + 1} failed: {e}")
+            
+            if attempt == max_attempts - 1:
+                if 'private' in error_msg or 'unavailable' in error_msg:
+                    raise ValueError("Video is private or unavailable")
+                elif 'bot' in error_msg or 'authentication' in error_msg or 'sign in' in error_msg:
+                    raise ValueError(f"{site.title()} is blocking automated requests. Try again later.")
+                elif 'region' in error_msg or 'blocked' in error_msg:
+                    raise ValueError("Video not available in your region")
+                elif '403' in error_msg or 'forbidden' in error_msg:
+                    raise ValueError("Access forbidden by the site")
+                elif 'copyright' in error_msg or 'removed' in error_msg:
+                    raise ValueError("Video removed due to copyright")
+                else:
+                    raise ValueError(f"Failed to extract: {str(e)[:150]}")
+            
+            time.sleep(2 ** attempt)
 
 @app.route('/')
 def home():
-    return jsonify({'status': 'running', 'version': '1.0'})
-
+    return jsonify({
+        'service': 'Video Downloader',
+        'version': '17.0.0',
+        'status': 'running',
+        'ffmpeg': is_ffmpeg_available(),
+        'supported_sites': ['Instagram', 'TikTok', 'Twitter', 'Pinterest', 'Vimeo', 'Facebook'],
+        'note': '1080p+ available with FFmpeg!'
+    })
 
 @app.route('/health')
 def health():
-    return jsonify({'status': 'healthy'}), 200
-
+    return jsonify({
+        'status': 'healthy',
+        'ffmpeg': is_ffmpeg_available(),
+        'version': '17.0.0'
+    }), 200
 
 @app.route('/api/get-info', methods=['POST', 'OPTIONS'])
-@limiter.limit("60 per hour")
 def get_info():
     if request.method == 'OPTIONS':
         return '', 204
-
-    data = request.get_json(silent=True) or {}
-    url = data.get('url', '').strip()
-
-    if not url:
-        return jsonify({'success': False, 'error': 'URL দিন'}), 400
-
-    # URL validate
+    
     try:
+        data = request.get_json(silent=True)
+        if data is None:
+            return jsonify({'success': False, 'error': 'Invalid request'}), 400
+        
+        url = data.get('url', '').strip()
+        if not url:
+            return jsonify({'success': False, 'error': 'URL required'}), 400
+        
         parsed = urlparse(url)
         if not parsed.scheme or not parsed.netloc:
-            return jsonify({'success': False, 'error': 'সঠিক URL দিন'}), 400
-    except Exception:
-        return jsonify({'success': False, 'error': 'Invalid URL'}), 400
-
-    site = detect_site(url)
-
-    # YouTube block করা
-    if site == 'youtube':
-        return jsonify({
-            'success': False,
-            'error': 'YouTube ভিডিও এই সাইটে সাপোর্ট করে না। আমাদের Desktop App ব্যবহার করুন।'
-        }), 400
-
-    try:
-        result = extract_info(url, site)
+            return jsonify({'success': False, 'error': 'Invalid URL'}), 400
+        
+        # Security check
+        blocked = ['localhost', '127.0.0.1', '192.168.', '10.', '172.16.']
+        if any(b in url.lower() for b in blocked):
+            return jsonify({'success': False, 'error': 'URL not allowed'}), 403
+        
+        site = detect_site(url)
+        logger.info(f"Processing {url[:50]}... ({site})")
+        
+        result = extract_video_info(url, site, max_attempts=3)
         return jsonify(result)
-
-    except yt_dlp.utils.DownloadError as e:
-        err = str(e).lower()
-        logger.warning(f"DownloadError [{site}]: {str(e)[:150]}")
-
-        if 'private' in err or 'unavailable' in err:
-            msg = 'ভিডিওটি প্রাইভেট বা মুছে ফেলা হয়েছে।'
-        elif 'login' in err or 'sign in' in err:
-            msg = 'এই ভিডিও দেখতে লগইন দরকার।'
-        elif 'not found' in err or '404' in err:
-            msg = 'ভিডিওটি খুঁজে পাওয়া যায়নি।'
-        else:
-            msg = f'ভিডিও তথ্য আনতে সমস্যা হয়েছে। আবার চেষ্টা করুন।'
-
-        return jsonify({'success': False, 'error': msg}), 400
-
+        
+    except ValueError as e:
+        logger.error(f"Extraction error: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 400
     except Exception as e:
-        logger.error(f"Error [{site}]: {e}", exc_info=True)
-        return jsonify({'success': False, 'error': 'সার্ভার সমস্যা। আবার চেষ্টা করুন।'}), 500
+        logger.error(f"Server error: {e}")
+        return jsonify({'success': False, 'error': f'Server error: {str(e)[:80]}'}), 500
 
+@app.route('/api/download', methods=['GET', 'POST', 'OPTIONS'])
+def download():
+    if request.method == 'OPTIONS':
+        return '', 204
+    
+    try:
+        if request.method == 'GET':
+            url = request.args.get('url', '').strip()
+            format_id = request.args.get('format_id', 'best')
+        else:
+            data = request.get_json(silent=True)
+            if data is None:
+                return jsonify({'success': False, 'error': 'Invalid request'}), 400
+            url = data.get('url', '').strip()
+            format_id = data.get('format_id', 'best')
+        
+        if not url:
+            return jsonify({'success': False, 'error': 'URL required'}), 400
+        
+        site = detect_site(url)
+        opts = get_ydl_opts(site)
+        opts['format'] = format_id
+        
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            info = ydl.extract_info(url, download=False)
+            if not info:
+                raise ValueError("No info")
+            
+            download_url = None
+            for fmt in info.get('formats', []):
+                if fmt.get('format_id') == format_id:
+                    download_url = fmt.get('url')
+                    break
+            
+            if not download_url:
+                download_url = info.get('url')
+            
+            if download_url:
+                title = re.sub(r'[^\w\s\.\-]', '', info.get('title', 'video'))
+                title = re.sub(r'\s+', '_', title.strip())[:100]
+                ext = 'mp4'
+                
+                return jsonify({
+                    'success': True,
+                    'download_url': download_url,
+                    'title': info.get('title'),
+                    'filename': f"{title}.{ext}",
+                })
+            else:
+                raise ValueError("No URL found")
+                
+    except Exception as e:
+        logger.error(f"Download error: {e}")
+        return jsonify({'success': False, 'error': f'Failed: {str(e)[:100]}'}), 500
 
 @app.route('/api/proxy-download')
-@limiter.limit("100 per hour")
 def proxy_download():
-    video_url = request.args.get('url', '').strip()
-    filename  = request.args.get('filename', 'video.mp4')
-    referer   = request.args.get('referer', '')
-
-    if not video_url:
-        return jsonify({'error': 'URL required'}), 400
-
-    ua = random.choice(USER_AGENTS)
-    headers = {
-        'User-Agent': ua,
-        'Accept': '*/*',
-        'Accept-Encoding': 'identity',
-    }
-    if referer:
-        headers['Referer'] = referer
-
-    range_header = request.headers.get('Range')
-    if range_header:
-        headers['Range'] = range_header
-
+    """Proxy download for direct download"""
     try:
-        resp = requests.get(video_url, stream=True, headers=headers,
-                           timeout=60, allow_redirects=True)
-
-        if resp.status_code not in (200, 206):
-            return jsonify({'error': f'Source error: {resp.status_code}'}), 502
-
-        ct = resp.headers.get('Content-Type', 'video/mp4')
-        cl = resp.headers.get('Content-Length')
-        safe_name = re.sub(r'[^\w\s.\-]', '', filename)[:120]
-
-        resp_headers = {
-            'Content-Disposition': f'attachment; filename="{safe_name}"',
-            'Content-Type': ct,
-            'Access-Control-Allow-Origin': '*',
-            'Cache-Control': 'no-store',
-        }
-        if cl:
-            resp_headers['Content-Length'] = cl
-        if resp.status_code == 206:
-            resp_headers['Content-Range'] = resp.headers.get('Content-Range', '')
-
+        video_url = request.args.get('url')
+        filename = request.args.get('filename', 'video.mp4')
+        
+        if not video_url:
+            return jsonify({'error': 'URL required'}), 400
+        
+        logger.info(f"Proxy download: {video_url[:80]}...")
+        
+        response = requests.get(video_url, stream=True, headers={
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        }, timeout=60)
+        
+        if response.status_code != 200:
+            return jsonify({'error': f'Failed: {response.status_code}'}), 500
+        
+        content_type = response.headers.get('Content-Type', 'video/mp4')
+        
         def generate():
-            for chunk in resp.iter_content(chunk_size=65536):
+            for chunk in response.iter_content(chunk_size=8192):
                 if chunk:
                     yield chunk
-
-        return Response(stream_with_context(generate()),
-                       status=resp.status_code, headers=resp_headers)
-
+        
+        return Response(
+            stream_with_context(generate()),
+            mimetype=content_type,
+            headers={
+                'Content-Disposition': f'attachment; filename="{filename}"',
+                'Content-Type': content_type,
+                'Cache-Control': 'no-cache',
+                'Access-Control-Allow-Origin': '*',
+            }
+        )
+        
     except Exception as e:
         logger.error(f"Proxy error: {e}")
-        return jsonify({'error': 'Download failed'}), 500
-
+        return jsonify({'error': f'Proxy failed: {str(e)[:100]}'}), 500
 
 @app.route('/api/proxy-image')
 def proxy_image():
-    image_url = request.args.get('url', '')
-    if not image_url:
-        return jsonify({'error': 'URL required'}), 400
+    """Proxy for thumbnails"""
     try:
-        r = requests.get(image_url,
-                        headers={'User-Agent': random.choice(USER_AGENTS)},
-                        timeout=10)
-        if r.status_code == 200:
-            return Response(r.content,
-                          mimetype=r.headers.get('Content-Type', 'image/jpeg'),
-                          headers={
-                              'Cache-Control': 'public, max-age=86400',
-                              'Access-Control-Allow-Origin': '*',
-                          })
+        image_url = request.args.get('url')
+        if not image_url:
+            return jsonify({'error': 'URL required'}), 400
+        
+        response = requests.get(image_url, headers={
+            'User-Agent': 'Mozilla/5.0',
+        }, timeout=10)
+        
+        if response.status_code == 200:
+            content_type = response.headers.get('Content-Type', 'image/jpeg')
+            return Response(
+                response.content,
+                mimetype=content_type,
+                headers={
+                    'Cache-Control': 'public, max-age=86400',
+                    'Access-Control-Allow-Origin': '*',
+                }
+            )
+        else:
+            return jsonify({'error': 'Failed to fetch image'}), 500
+            
     except Exception as e:
-        logger.error(f"Image proxy: {e}")
-    return jsonify({'error': 'Image not available'}), 500
-
+        logger.error(f"Image proxy error: {e}")
+        return jsonify({'error': f'Image failed: {str(e)[:80]}'}), 500
 
 @app.errorhandler(404)
 def not_found(e):
     return jsonify({'error': 'Not found'}), 404
 
-@app.errorhandler(429)
-def rate_limited(e):
-    return jsonify({'error': 'অনেক বেশি request। একটু অপেক্ষা করুন।'}), 429
-
 @app.errorhandler(500)
 def server_error(e):
+    logger.error(f"Internal error: {e}")
     return jsonify({'error': 'Server error'}), 500
-
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 8000))
-    logger.info(f"Starting on port {port}")
+    logger.info(f"🚀 Starting Video Downloader v17.0.0 on port {port}")
+    logger.info(f"✅ FFmpeg available: {is_ffmpeg_available()}")
     app.run(host='0.0.0.0', port=port, debug=False)
