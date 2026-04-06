@@ -305,8 +305,12 @@ def extract_video_info(url, site, max_attempts=3):
             logger.error(f"Attempt {attempt + 1} failed: {e}")
             
             if attempt == max_attempts - 1:
-                if site == 'dailymotion' and 'impersonation' in error_msg:
-                    raise ValueError("Dailymotion requires additional libraries. Try using a different video or contact support.")
+                # ✅ Careful error handling - don't break other sites
+                if site == 'dailymotion':
+                    if 'impersonation' in error_msg or 'curl_cffi' in error_msg:
+                        raise ValueError("Dailymotion requires browser impersonation. Please contact support to install curl_cffi library.")
+                    else:
+                        raise ValueError(f"Failed to extract Dailymotion video: {str(e)[:100]}")
                 elif site == 'facebook' and ('login' in error_msg or 'unsupported url' in error_msg):
                     raise ValueError("This Facebook video requires login. Only public videos are supported.")
                 elif 'private' in error_msg or 'unavailable' in error_msg:
