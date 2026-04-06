@@ -35,28 +35,18 @@ def detect_site(url):
         return 'tiktok'
     elif 'twitter.com' in url_lower or 'x.com' in url_lower:
         return 'twitter'
+    elif 'reddit.com' in url_lower or 'redd.it' in url_lower:
+        return 'reddit'
     elif 'pinterest.com' in url_lower or 'pin.it' in url_lower:
         return 'pinterest'
     elif 'vimeo.com' in url_lower:
         return 'vimeo'
-    elif 'facebook.com' in url_lower or 'fb.watch' in url_lower:
+    elif 'dailymotion.com' in url_lower or 'dai.ly' in url_lower:
+        return 'dailymotion'
+    elif 'facebook.com' in url_lower or 'fb.watch' in url_lower or 'fb.com' in url_lower:
         return 'facebook'
     else:
         return 'generic'
-
-def is_ffmpeg_available():
-    """Check if FFmpeg is installed"""
-    return shutil.which('ffmpeg') is not None
-
-def cleanup_temp_files(*file_paths):
-    """✅ FIX: Clean up temporary files"""
-    for path in file_paths:
-        try:
-            if path and os.path.exists(path):
-                os.remove(path)
-                logger.info(f"Cleaned up: {path}")
-        except Exception as e:
-            logger.warning(f"Failed to cleanup {path}: {e}")
 
 def get_ydl_opts(site='generic', download_mode=False):
     """Get yt-dlp options for the site"""
@@ -79,35 +69,65 @@ def get_ydl_opts(site='generic', download_mode=False):
         }
     }
     
-    if site == 'instagram':
+    # ✅ Dailymotion-specific options
+    if site == 'dailymotion':
+        opts.update({
+            'extractor_args': {'dailymotion': {}},
+            'http_headers': {
+                'Referer': 'https://www.dailymotion.com/',
+                'Origin': 'https://www.dailymotion.com',
+            }
+        })
+    
+    # ✅ Facebook-specific options
+    elif site == 'facebook':
+        opts.update({
+            'extractor_args': {'facebook': {}},
+            'http_headers': {
+                'Referer': 'https://www.facebook.com/',
+            }
+        })
+    
+    # ✅ Instagram
+    elif site == 'instagram':
         opts.update({
             'extractor_args': {'instagram': {'include_formats': True}},
             'http_headers': {'X-IG-App-ID': '936619743392459'}
         })
+    
+    # ✅ TikTok
     elif site == 'tiktok':
         opts.update({
             'extractor_args': {'tiktok': {'embed_source': 'embed'}},
             'http_headers': {'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 14_0 like Mac OS X)'}
         })
+    
+    # ✅ Twitter/X
     elif site == 'twitter':
         opts.update({
             'extractor_args': {'twitter': {}},
             'http_headers': {'Referer': 'https://twitter.com/'}
         })
+    
+    # ✅ Reddit
+    elif site == 'reddit':
+        opts.update({
+            'extractor_args': {'reddit': {}},
+            'http_headers': {'Referer': 'https://www.reddit.com/'}
+        })
+    
+    # ✅ Pinterest
     elif site == 'pinterest':
         opts.update({
             'extractor_args': {'pinterest': {}},
             'http_headers': {'Referer': 'https://www.pinterest.com/'}
         })
+    
+    # ✅ Vimeo
     elif site == 'vimeo':
         opts.update({
             'extractor_args': {'vimeo': {'force_noplaylist': True}},
             'http_headers': {'Referer': 'https://vimeo.com/'}
-        })
-    elif site == 'facebook':
-        opts.update({
-            'extractor_args': {'facebook': {}},
-            'http_headers': {'Referer': 'https://www.facebook.com/'}
         })
     
     return opts
@@ -283,12 +303,17 @@ def extract_video_info(url, site, max_attempts=3):
                     'platform': site,
                 }
                 
-        except Exception as e:
+        except yt_dlp.utils.DownloadError as e:
             error_msg = str(e).lower()
             logger.error(f"Attempt {attempt + 1} failed: {e}")
             
             if attempt == max_attempts - 1:
-                if 'private' in error_msg or 'unavailable' in error_msg:
+                # ✅ Better error messages for specific sites
+                if site == 'dailymotion' and 'impersonation' in error_msg:
+                    raise ValueError("Dailymotion requires browser impersonation support. Please contact the site administrator to install curl_cffi library.")
+                elif site == 'facebook' and ('login' in error_msg or 'unsupported url' in error_msg):
+                    raise ValueError("This Facebook video requires login. Only public videos are supported without cookies.")
+                elif 'private' in error_msg or 'unavailable' in error_msg:
                     raise ValueError("Video is private or unavailable")
                 elif 'bot' in error_msg or 'authentication' in error_msg or 'sign in' in error_msg:
                     raise ValueError(f"{site.title()} is blocking automated requests. Try again later.")
