@@ -1,6 +1,6 @@
 """
 🎬 Professional Video Downloader - 1080p+ with FFmpeg Merging
-Supports: Instagram, TikTok, Twitter, Pinterest, Vimeo, Facebook
+Supports: Instagram, TikTok, Twitter, Pinterest, Reddit, Vimeo, Facebook, Dailymotion
 """
 
 from flask import Flask, request, jsonify, Response, stream_with_context
@@ -48,6 +48,20 @@ def detect_site(url):
     else:
         return 'generic'
 
+def is_ffmpeg_available():
+    """✅ Check if FFmpeg is installed"""
+    return shutil.which('ffmpeg') is not None
+
+def cleanup_temp_files(*file_paths):
+    """Clean up temporary files"""
+    for path in file_paths:
+        try:
+            if path and os.path.exists(path):
+                os.remove(path)
+                logger.info(f"Cleaned up: {path}")
+        except Exception as e:
+            logger.warning(f"Failed to cleanup {path}: {e}")
+
 def get_ydl_opts(site='generic', download_mode=False):
     """Get yt-dlp options for the site"""
     opts = {
@@ -69,8 +83,37 @@ def get_ydl_opts(site='generic', download_mode=False):
         }
     }
     
-    # ✅ Dailymotion-specific options
-    if site == 'dailymotion':
+    if site == 'instagram':
+        opts.update({
+            'extractor_args': {'instagram': {'include_formats': True}},
+            'http_headers': {'X-IG-App-ID': '936619743392459'}
+        })
+    elif site == 'tiktok':
+        opts.update({
+            'extractor_args': {'tiktok': {'embed_source': 'embed'}},
+            'http_headers': {'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 14_0 like Mac OS X)'}
+        })
+    elif site == 'twitter':
+        opts.update({
+            'extractor_args': {'twitter': {}},
+            'http_headers': {'Referer': 'https://twitter.com/'}
+        })
+    elif site == 'reddit':
+        opts.update({
+            'extractor_args': {'reddit': {}},
+            'http_headers': {'Referer': 'https://www.reddit.com/'}
+        })
+    elif site == 'pinterest':
+        opts.update({
+            'extractor_args': {'pinterest': {}},
+            'http_headers': {'Referer': 'https://www.pinterest.com/'}
+        })
+    elif site == 'vimeo':
+        opts.update({
+            'extractor_args': {'vimeo': {'force_noplaylist': True}},
+            'http_headers': {'Referer': 'https://vimeo.com/'}
+        })
+    elif site == 'dailymotion':
         opts.update({
             'extractor_args': {'dailymotion': {}},
             'http_headers': {
@@ -78,56 +121,10 @@ def get_ydl_opts(site='generic', download_mode=False):
                 'Origin': 'https://www.dailymotion.com',
             }
         })
-    
-    # ✅ Facebook-specific options
     elif site == 'facebook':
         opts.update({
             'extractor_args': {'facebook': {}},
-            'http_headers': {
-                'Referer': 'https://www.facebook.com/',
-            }
-        })
-    
-    # ✅ Instagram
-    elif site == 'instagram':
-        opts.update({
-            'extractor_args': {'instagram': {'include_formats': True}},
-            'http_headers': {'X-IG-App-ID': '936619743392459'}
-        })
-    
-    # ✅ TikTok
-    elif site == 'tiktok':
-        opts.update({
-            'extractor_args': {'tiktok': {'embed_source': 'embed'}},
-            'http_headers': {'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 14_0 like Mac OS X)'}
-        })
-    
-    # ✅ Twitter/X
-    elif site == 'twitter':
-        opts.update({
-            'extractor_args': {'twitter': {}},
-            'http_headers': {'Referer': 'https://twitter.com/'}
-        })
-    
-    # ✅ Reddit
-    elif site == 'reddit':
-        opts.update({
-            'extractor_args': {'reddit': {}},
-            'http_headers': {'Referer': 'https://www.reddit.com/'}
-        })
-    
-    # ✅ Pinterest
-    elif site == 'pinterest':
-        opts.update({
-            'extractor_args': {'pinterest': {}},
-            'http_headers': {'Referer': 'https://www.pinterest.com/'}
-        })
-    
-    # ✅ Vimeo
-    elif site == 'vimeo':
-        opts.update({
-            'extractor_args': {'vimeo': {'force_noplaylist': True}},
-            'http_headers': {'Referer': 'https://vimeo.com/'}
+            'http_headers': {'Referer': 'https://www.facebook.com/'}
         })
     
     return opts
@@ -308,11 +305,10 @@ def extract_video_info(url, site, max_attempts=3):
             logger.error(f"Attempt {attempt + 1} failed: {e}")
             
             if attempt == max_attempts - 1:
-                # ✅ Better error messages for specific sites
                 if site == 'dailymotion' and 'impersonation' in error_msg:
-                    raise ValueError("Dailymotion requires browser impersonation support. Please contact the site administrator to install curl_cffi library.")
+                    raise ValueError("Dailymotion requires additional libraries. Try using a different video or contact support.")
                 elif site == 'facebook' and ('login' in error_msg or 'unsupported url' in error_msg):
-                    raise ValueError("This Facebook video requires login. Only public videos are supported without cookies.")
+                    raise ValueError("This Facebook video requires login. Only public videos are supported.")
                 elif 'private' in error_msg or 'unavailable' in error_msg:
                     raise ValueError("Video is private or unavailable")
                 elif 'bot' in error_msg or 'authentication' in error_msg or 'sign in' in error_msg:
@@ -332,10 +328,10 @@ def extract_video_info(url, site, max_attempts=3):
 def home():
     return jsonify({
         'service': 'Video Downloader',
-        'version': '19.0.0',
+        'version': '20.0.0',
         'status': 'running',
         'ffmpeg': is_ffmpeg_available(),
-        'supported_sites': ['Instagram', 'TikTok', 'Twitter', 'Pinterest', 'Vimeo', 'Facebook'],
+        'supported_sites': ['Instagram', 'TikTok', 'Twitter', 'Pinterest', 'Reddit', 'Vimeo', 'Facebook', 'Dailymotion'],
         'note': '1080p+ with audio via FFmpeg merging!'
     })
 
@@ -344,7 +340,7 @@ def health():
     return jsonify({
         'status': 'healthy',
         'ffmpeg': is_ffmpeg_available(),
-        'version': '19.0.0'
+        'version': '20.0.0'
     }), 200
 
 @app.route('/api/get-info', methods=['POST', 'OPTIONS'])
@@ -420,7 +416,6 @@ def download():
                 logger.error("No info returned from yt-dlp")
                 raise ValueError("No info")
             
-            # Find the format
             target_format = None
             for fmt in info.get('formats', []):
                 if fmt.get('format_id') == format_id:
@@ -438,14 +433,11 @@ def download():
             
             logger.info(f"vcodec={vcodec}, acodec={acodec}, needs_merge={needs_merge}")
             
-            # === CASE 1: Needs merge AND FFmpeg available ===
             if needs_merge and ffmpeg_available:
-                # ✅ FIX: Handle None values in tbr when sorting
                 def safe_tbr(fmt):
                     tbr = fmt.get('tbr')
                     return tbr if tbr is not None else 0
                 
-                # Find matching audio format (best quality audio)
                 audio_format = None
                 for fmt in sorted(info.get('formats', []), key=safe_tbr, reverse=True):
                     if fmt.get('vcodec') == 'none' and fmt.get('acodec') != 'none':
@@ -457,7 +449,6 @@ def download():
                     logger.error("No audio format found for merging")
                     raise ValueError("No matching audio format found")
                 
-                # Generate unique temp file names
                 timestamp = int(time.time())
                 video_temp = os.path.join(app.config['TEMP_FOLDER'], f'v_{timestamp}_{target_format["format_id"]}.mp4')
                 audio_temp = os.path.join(app.config['TEMP_FOLDER'], f'a_{timestamp}_{audio_format["format_id"]}.m4a')
@@ -466,7 +457,6 @@ def download():
                 temp_files = [video_temp, audio_temp, output_temp]
                 
                 try:
-                    # Download video stream
                     logger.info(f"Downloading video to: {video_temp}")
                     video_opts = opts.copy()
                     video_opts['format'] = target_format['format_id']
@@ -487,7 +477,6 @@ def download():
                         logger.error(f"Video file too small: {video_size} bytes")
                         raise ValueError("Video file corrupted or too small")
                     
-                    # Download audio stream
                     logger.info(f"Downloading audio to: {audio_temp}")
                     audio_opts = opts.copy()
                     audio_opts['format'] = audio_format['format_id']
@@ -508,7 +497,6 @@ def download():
                         logger.error(f"Audio file too small: {audio_size} bytes")
                         raise ValueError("Audio file corrupted or too small")
                     
-                    # Merge using FFmpeg
                     logger.info("Starting FFmpeg merge...")
                     merge_video_audio(video_temp, audio_temp, output_temp)
                     
@@ -523,7 +511,6 @@ def download():
                         logger.error(f"Merged file too small: {output_size} bytes")
                         raise ValueError("Merged file corrupted")
                     
-                    # Clean up source files
                     cleanup_temp_files(video_temp, audio_temp)
                     
                     title = re.sub(r'[^\w\s\.\-]', '', info.get('title', 'video'))
@@ -548,7 +535,6 @@ def download():
                     cleanup_temp_files(*temp_files)
                     raise ValueError(f"Merging failed: {str(merge_error)[:150]}")
             
-            # === CASE 2: Direct download (no merge needed) ===
             else:
                 download_url = target_format.get('url') or info.get('url')
                 
@@ -693,7 +679,7 @@ def server_error(e):
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 8000))
-    logger.info(f"🚀 Starting Video Downloader v19.0.0 on port {port}")
+    logger.info(f"🚀 Starting Video Downloader v20.0.0 on port {port}")
     logger.info(f"✅ FFmpeg available: {is_ffmpeg_available()}")
     logger.info(f"✅ Temp folder: {app.config['TEMP_FOLDER']}")
     app.run(host='0.0.0.0', port=port, debug=False)
