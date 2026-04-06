@@ -22,7 +22,7 @@ Thumbs.db
 *.log
 logs/
 
-# NEVER commit these:
+# Never commit these:
 .env
 *.key
 *.secret
